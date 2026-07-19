@@ -34,7 +34,7 @@ public actor UpdateChecker {
 
     private let logger = Logger(subsystem: "FinderConvert", category: "update-checker")
     // Change this to your GitHub repo
-    private let repoOwner = "yuriy"
+    private let repoOwner = "turman17"
     private let repoName = "FinderConvert"
     private let currentVersion = "1.0.0"
 
