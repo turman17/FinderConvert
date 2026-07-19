@@ -1,0 +1,5 @@
+module CLame {
+    header "include/lame.h"
+    link "mp3lame"
+    export *
+}

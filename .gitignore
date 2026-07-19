@@ -1,0 +1,31 @@
+# Build artifacts
+.local/
+DerivedData/
+build/
+*.xcodeproj/xcuserdata/
+*.xcodeproj/project.xcworkspace/xcuserdata/
+
+# Xcode
+xcuserdata/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Debug/test logs
+*.log
+app_logs*.txt
+debug_logs*.txt
+process_logs*.txt
+crash_logs*.txt
+system_url_logs*.txt
+build_log*.txt
+
+# Scratch/test files
+scratch/
+test_*.swift
+
+# Distribution
+*.dmg
+*.zip

@@ -1,0 +1,8 @@
+"unsupported_selection" = "The selected items do not share a supported conversion.";
+"unsupported_file_type" = "%@ is not a supported file type.";
+"unsupported_output" = "Conversion to %@ is not supported for this file type.";
+"unreadable_input" = "The selected file could not be read.";
+"failed_to_decode_image" = "The image could not be decoded.";
+"failed_to_encode_image" = "The image could not be written as %@.";
+"invalid_destination" = "FinderConvert could not create a safe destination file.";
+"notification_authorization_missing" = "Notifications are not authorized for FinderConvert.";
