@@ -5,6 +5,22 @@ import PDFKit
 import UniformTypeIdentifiers
 import WebKit
 
+private final class PDFPrintCompletionDelegate: NSObject {
+    private let continuation: CheckedContinuation<Bool, Never>
+
+    init(_ continuation: CheckedContinuation<Bool, Never>) {
+        self.continuation = continuation
+    }
+
+    @objc func printOperationDidRun(
+        _ printOperation: NSPrintOperation,
+        success: Bool,
+        contextInfo: UnsafeMutableRawPointer?
+    ) {
+        continuation.resume(returning: success)
+    }
+}
+
 public actor DocumentConversionEngine: ConversionEngine {
     public let identifier = "com.finderconvert.engine.document.text"
     private let logger = Logger(subsystem: "FinderConvert", category: "document-engine")
@@ -130,13 +146,13 @@ public actor DocumentConversionEngine: ConversionEngine {
                                       documentAttributes: [.documentType: NSAttributedString.DocumentType.rtf])
 
         try await MainActor.run {
-            let pageWidth: CGFloat = 612
-            let pageHeight: CGFloat = 792
+            let pageSize = NSSize(width: 612, height: 792)
             let margin: CGFloat = 72
-            let contentWidth = pageWidth - margin * 2
-            let contentHeight = pageHeight - margin * 2
+            let contentWidth = pageSize.width - margin * 2
 
-            let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: contentHeight))
+            let textView = NSTextView(frame: NSRect(x: 0, y: 0, width: contentWidth, height: pageSize.height))
+            textView.isVerticallyResizable = true
+            textView.textContainer?.widthTracksTextView = true
 
             if let rtfData,
                let restored = NSAttributedString(rtf: rtfData, documentAttributes: nil) {
@@ -146,6 +162,36 @@ public actor DocumentConversionEngine: ConversionEngine {
             }
             textView.sizeToFit()
 
+            // Print the text view so long documents paginate across multiple
+            // pages (dataWithPDF produces a single oversized page)
+            let window = NSWindow(
+                contentRect: NSRect(origin: .zero, size: pageSize),
+                styleMask: [.borderless],
+                backing: .buffered,
+                defer: false
+            )
+            window.contentView = textView
+
+            let printInfo = NSPrintInfo()
+            printInfo.paperSize = pageSize
+            printInfo.topMargin = margin
+            printInfo.bottomMargin = margin
+            printInfo.leftMargin = margin
+            printInfo.rightMargin = margin
+            printInfo.horizontalPagination = .fit
+            printInfo.verticalPagination = .automatic
+            printInfo.jobDisposition = .save
+            printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = url
+
+            let operation = NSPrintOperation(view: textView, printInfo: printInfo)
+            operation.showsPrintPanel = false
+            operation.showsProgressPanel = false
+
+            if operation.run(), FileManager.default.fileExists(atPath: url.path) {
+                return
+            }
+
+            // Fallback: capture the full content as a single tall PDF page
             let pdfData = textView.dataWithPDF(inside: textView.bounds)
             try pdfData.write(to: url)
         }
@@ -185,8 +231,57 @@ public actor DocumentConversionEngine: ConversionEngine {
             webView.navigationDelegate = delegate
         }
 
+        // Let WebKit finish layout after the navigation callback fires
+        try await Task.sleep(nanoseconds: 300_000_000)
+
+        // Print through WebKit so long documents paginate across multiple pages
+        // (a fixed-rect webView.pdf() snapshot only captures the first page)
+        let pageSize = NSSize(width: 612, height: 792)
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: pageSize),
+            styleMask: [.borderless],
+            backing: .buffered,
+            defer: false
+        )
+        window.contentView = webView
+
+        let printInfo = NSPrintInfo()
+        printInfo.paperSize = pageSize
+        printInfo.topMargin = 36
+        printInfo.bottomMargin = 36
+        printInfo.leftMargin = 36
+        printInfo.rightMargin = 36
+        printInfo.horizontalPagination = .fit
+        printInfo.verticalPagination = .automatic
+        printInfo.jobDisposition = .save
+        printInfo.dictionary()[NSPrintInfo.AttributeKey.jobSavingURL] = outputURL
+
+        let operation = webView.printOperation(with: printInfo)
+        operation.showsPrintPanel = false
+        operation.showsProgressPanel = false
+        operation.view?.frame = NSRect(origin: .zero, size: pageSize)
+
+        let printed = await withCheckedContinuation { (continuation: CheckedContinuation<Bool, Never>) in
+            let delegate = PDFPrintCompletionDelegate(continuation)
+            objc_setAssociatedObject(webView, "printDelegate", delegate, .OBJC_ASSOCIATION_RETAIN)
+            operation.runModal(
+                for: window,
+                delegate: delegate,
+                didRun: #selector(PDFPrintCompletionDelegate.printOperationDidRun(_:success:contextInfo:)),
+                contextInfo: nil
+            )
+        }
+
+        if printed, FileManager.default.fileExists(atPath: outputURL.path) {
+            return
+        }
+
+        // Fallback: capture the full content as a single tall PDF page
+        let heightValue = try? await webView.evaluateJavaScript("document.documentElement.scrollHeight")
+        let contentHeight = (heightValue as? Double).map { CGFloat($0) } ?? pageSize.height
+        webView.frame = NSRect(x: 0, y: 0, width: pageSize.width, height: max(contentHeight, pageSize.height))
         let pdfConfig = WKPDFConfiguration()
-        pdfConfig.rect = CGRect(x: 0, y: 0, width: 612, height: 792)
+        pdfConfig.rect = webView.bounds
         let pdfData = try await webView.pdf(configuration: pdfConfig)
         try pdfData.write(to: outputURL)
     }
