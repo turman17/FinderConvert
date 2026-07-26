@@ -9,8 +9,6 @@
 /* Begin PBXBuildFile section */
 		9C3A360072E1454214D27F5D /* FinderConvertCore in Frameworks */ = {isa = PBXBuildFile; productRef = C0D827DCA6116783FF390D7F /* FinderConvertCore */; };
 		C00000000000000000000001 /* FinderConvertApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000002 /* FinderConvertApp.swift */; };
-		C00000000000000000000002 /* WelcomeView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000003 /* WelcomeView.swift */; };
-		C00000000000000000000003 /* PlaceholderDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000004 /* PlaceholderDetailView.swift */; };
 		C00000000000000000000004 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A00000000000000000000007 /* Localizable.strings */; };
 		C00000000000000000000005 /* FinderConvertActionExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000B /* FinderConvertActionExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 		C00000000000000000000006 /* FinderSyncController.swift in Sources */ = {isa = PBXBuildFile; fileRef = A0000000000000000000000C /* FinderSyncController.swift */; };
@@ -48,8 +46,6 @@
 /* Begin PBXFileReference section */
 		A00000000000000000000001 /* FinderConvert.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = FinderConvert.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A00000000000000000000002 /* FinderConvertApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FinderConvertApp.swift; sourceTree = "<group>"; };
-		A00000000000000000000003 /* WelcomeView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WelcomeView.swift; sourceTree = "<group>"; };
-		A00000000000000000000004 /* PlaceholderDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaceholderDetailView.swift; sourceTree = "<group>"; };
 		A00000000000000000000005 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		A00000000000000000000006 /* FinderConvert.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = FinderConvert.entitlements; sourceTree = "<group>"; };
 		A00000000000000000000007 /* Localizable.strings */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; path = Localizable.strings; sourceTree = "<group>"; };
@@ -107,8 +103,6 @@
 			isa = PBXGroup;
 			children = (
 				A00000000000000000000002 /* FinderConvertApp.swift */,
-				A00000000000000000000003 /* WelcomeView.swift */,
-				A00000000000000000000004 /* PlaceholderDetailView.swift */,
 				A00000000000000000000005 /* Info.plist */,
 				A00000000000000000000006 /* FinderConvert.entitlements */,
 				B00000000000000000000006 /* Resources */,
@@ -317,8 +311,6 @@
 			buildActionMask = 2147483647;
 			files = (
 				C00000000000000000000001 /* FinderConvertApp.swift in Sources */,
-				C00000000000000000000002 /* WelcomeView.swift in Sources */,
-				C00000000000000000000003 /* PlaceholderDetailView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
