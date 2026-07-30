@@ -88,6 +88,12 @@ public struct PreferencesManager: @unchecked Sendable {
         defaults.set(value, forKey: "stripMetadata_\(format.rawValue)")
     }
 
+    // Visual style for Markdown → PDF/HTML conversion
+    public var markdownStyle: MarkdownStyle {
+        get { MarkdownStyle(rawValue: defaults.string(forKey: "markdownStyle") ?? "") ?? .modern }
+        nonmutating set { defaults.set(newValue.rawValue, forKey: "markdownStyle") }
+    }
+
     // Batch rename suffix
     public var renameSuffix: String {
         get {
@@ -142,7 +148,35 @@ public struct PreferencesManager: @unchecked Sendable {
         }
     }
 
-    public func applyPreset(_ preset: PresetSettings) {
+    // Name of the currently applied preset (nil = none). While a preset is
+    // active, the settings it replaced are kept as a baseline so it can be
+    // unapplied.
+    public var activePresetName: String? {
+        defaults.string(forKey: "activePresetName")
+    }
+
+    public func applyPreset(_ preset: PresetSettings, named name: String? = nil) {
+        // Capture the pre-preset settings once; applying another preset on
+        // top keeps the original baseline so unapply always returns to the
+        // user's own settings.
+        if defaults.data(forKey: "presetBaseline") == nil,
+           let data = try? JSONEncoder().encode(captureSnapshot()) {
+            defaults.set(data, forKey: "presetBaseline")
+        }
+
+        applyPresetValues(preset)
+
+        if let name {
+            defaults.set(name, forKey: "activePresetName")
+        } else {
+            defaults.removeObject(forKey: "activePresetName")
+        }
+    }
+
+    // Write a preset's values into the per-format settings without touching
+    // the apply/unapply baseline bookkeeping. Used for temporary per-file
+    // preset application during conversion.
+    public func applyPresetValues(_ preset: PresetSettings) {
         if let q = preset.jpegQuality { setQuality(q, for: .jpeg) }
         if let q = preset.heicQuality { setQuality(q, for: .heic) }
         if let q = preset.webpQuality { setQuality(q, for: .webp) }
@@ -169,6 +203,83 @@ public struct PreferencesManager: @unchecked Sendable {
         }
     }
 
+    // MARK: Temporary settings snapshots (per-file preset conversion)
+
+    public func captureSettingsSnapshotData() -> Data? {
+        try? JSONEncoder().encode(captureSnapshot())
+    }
+
+    public func restoreSettingsSnapshot(_ data: Data) {
+        guard let snap = try? JSONDecoder().decode(FormatSettingsSnapshot.self, from: data) else { return }
+        restore(snap)
+    }
+
+    // MARK: Built-in preset overrides (editable built-ins)
+
+    public func builtInOverride(named name: String) -> PresetSettings? {
+        loadBuiltInOverrides()[name]
+    }
+
+    public func setBuiltInOverride(_ settings: PresetSettings, named name: String) {
+        var overrides = loadBuiltInOverrides()
+        overrides[name] = settings
+        if let data = try? JSONEncoder().encode(overrides) {
+            defaults.set(data, forKey: "builtInPresetOverrides")
+        }
+    }
+
+    public func clearBuiltInOverride(named name: String) {
+        var overrides = loadBuiltInOverrides()
+        overrides.removeValue(forKey: name)
+        if let data = try? JSONEncoder().encode(overrides) {
+            defaults.set(data, forKey: "builtInPresetOverrides")
+        }
+    }
+
+    private func loadBuiltInOverrides() -> [String: PresetSettings] {
+        guard let data = defaults.data(forKey: "builtInPresetOverrides") else { return [:] }
+        return (try? JSONDecoder().decode([String: PresetSettings].self, from: data)) ?? [:]
+    }
+
+    // Effective settings for a preset name: user preset, edited built-in,
+    // or stock built-in — in that order.
+    public func presetSettings(named name: String) -> PresetSettings? {
+        if let user = loadPreset(name: name) { return user }
+        if let override = builtInOverride(named: name) { return override }
+        return PresetSettings.builtIn.first { $0.name == name }?.settings
+    }
+
+    // Restore the settings captured before the first preset was applied.
+    public func unapplyActivePreset() {
+        defer {
+            defaults.removeObject(forKey: "presetBaseline")
+            defaults.removeObject(forKey: "activePresetName")
+        }
+        guard let data = defaults.data(forKey: "presetBaseline"),
+              let snap = try? JSONDecoder().decode(FormatSettingsSnapshot.self, from: data) else { return }
+        restore(snap)
+    }
+
+    private func restore(_ snap: FormatSettingsSnapshot) {
+        for (key, v) in snap.quality { if let f = OutputFormat(rawValue: key) { setQuality(v, for: f) } }
+        for (key, v) in snap.resize { if let f = OutputFormat(rawValue: key) { setResizePercent(v, for: f) } }
+        for (key, v) in snap.videoPreset { if let f = OutputFormat(rawValue: key) { setVideoPreset(v, for: f) } }
+        for (key, v) in snap.stripMetadata { if let f = OutputFormat(rawValue: key) { setStripMetadata(v, for: f) } }
+        for (key, v) in snap.audioBitrate { if let f = OutputFormat(rawValue: key) { setAudioBitrate(v, for: f) } }
+    }
+
+    private func captureSnapshot() -> FormatSettingsSnapshot {
+        var snap = FormatSettingsSnapshot()
+        for f in OutputFormat.allCases {
+            if f.supportsQuality { snap.quality[f.rawValue] = quality(for: f) }
+            if f.supportsResize { snap.resize[f.rawValue] = resizePercent(for: f) }
+            if f.supportsVideoQuality { snap.videoPreset[f.rawValue] = videoPreset(for: f) }
+            if f.category == .image { snap.stripMetadata[f.rawValue] = stripMetadata(for: f) }
+            if f.supportsAudioBitrate { snap.audioBitrate[f.rawValue] = audioBitrate(for: f) }
+        }
+        return snap
+    }
+
     // Onboarding
     public var hasCompletedOnboarding: Bool {
         get { defaults.bool(forKey: "hasCompletedOnboarding") }
@@ -190,6 +301,15 @@ public struct PreferencesManager: @unchecked Sendable {
             defaults.set(newValue, forKey: "imageResizePercent")
         }
     }
+}
+
+// Per-format settings captured before a preset overwrites them
+struct FormatSettingsSnapshot: Codable {
+    var quality: [String: Double] = [:]
+    var resize: [String: Int] = [:]
+    var videoPreset: [String: String] = [:]
+    var stripMetadata: [String: Bool] = [:]
+    var audioBitrate: [String: Int] = [:]
 }
 
 public struct PresetSettings: Codable, Sendable {
@@ -216,8 +336,12 @@ public struct PresetSettings: Codable, Sendable {
         self.description = description
     }
 
-    public static let builtIn: [(name: String, icon: String, settings: PresetSettings)] = [
-        // Image presets
+    public static var builtIn: [(name: String, icon: String, settings: PresetSettings)] {
+        builtInGroups.flatMap(\.presets)
+    }
+
+    public static let builtInGroups: [(title: String, icon: String, presets: [(name: String, icon: String, settings: PresetSettings)])] = [
+        ("Image", "photo", [
         ("Web Optimized", "globe", PresetSettings(
             jpegQuality: 0.75, heicQuality: 0.75, webpQuality: 0.75, avifQuality: 0.7,
             resizePercent: 75, stripMetadata: true,
@@ -253,7 +377,8 @@ public struct PresetSettings: Codable, Sendable {
             resizePercent: 100, stripMetadata: false,
             description: "Near-lossless quality at full resolution. Keeps metadata for color profiles."
         )),
-        // Video presets
+        ]),
+        ("Video", "film", [
         ("Highest Quality", "film", PresetSettings(
             videoPreset: "highest",
             description: "Maximum video quality. Largest file size."
@@ -270,7 +395,8 @@ public struct PresetSettings: Codable, Sendable {
             videoPreset: "low",
             description: "Smallest file size. Lower quality."
         )),
-        // Audio presets
+        ]),
+        ("Audio", "waveform", [
         ("HQ Audio", "headphones", PresetSettings(
             audioBitrate: 256000,
             description: "256 kbps. Near-CD quality for music."
@@ -283,6 +409,7 @@ public struct PresetSettings: Codable, Sendable {
             audioBitrate: 64000,
             description: "64 kbps. Optimized for voice recordings."
         )),
+        ]),
     ]
 }
 

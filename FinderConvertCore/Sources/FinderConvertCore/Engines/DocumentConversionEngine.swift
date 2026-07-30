@@ -307,7 +307,10 @@ public actor DocumentConversionEngine: ConversionEngine {
 
     // MARK: - Markdown
 
-    nonisolated private func markdownToHTML(_ markdown: String) -> String {
+    nonisolated private func markdownToHTML(
+        _ markdown: String,
+        style: MarkdownStyle = PreferencesManager.shared.markdownStyle
+    ) -> String {
         var html = ""
         let lines = markdown.components(separatedBy: .newlines)
         var inCodeBlock = false
@@ -406,12 +409,7 @@ public actor DocumentConversionEngine: ConversionEngine {
         <!DOCTYPE html>
         <html><head><meta charset="utf-8">
         <style>
-        body { font-family: -apple-system, sans-serif; max-width: 700px; margin: 40px auto; padding: 0 20px; line-height: 1.6; color: #333; }
-        code { background: #f4f4f4; padding: 2px 6px; border-radius: 3px; font-size: 0.9em; }
-        pre code { display: block; padding: 16px; overflow-x: auto; }
-        blockquote { border-left: 4px solid #ddd; margin: 0; padding-left: 16px; color: #666; }
-        h1, h2, h3 { margin-top: 1.5em; }
-        hr { border: none; border-top: 1px solid #ddd; margin: 2em 0; }
+        \(style.css)
         </style></head><body>
         \(html)
         </body></html>

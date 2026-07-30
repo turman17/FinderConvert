@@ -7,6 +7,7 @@ import Combine
 
 extension Notification.Name {
     static let navigateToTab = Notification.Name("FinderConvert.navigateToTab")
+    static let showTipsPopover = Notification.Name("FinderConvert.showTipsPopover")
 }
 
 // MARK: - Menu Bar Popover View
@@ -575,13 +576,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         appMenuItem.submenu = appMenu
         mainMenu.addItem(appMenuItem)
 
+        // Tips menu
+        let tipsMenu = NSMenu(title: "Tips")
+        tipsMenu.addItem(withTitle: "Tips & Tricks", action: #selector(showTips), keyEquivalent: "?")
+        tipsMenu.addItem(NSMenuItem.separator())
+        tipsMenu.addItem(withTitle: "Show Tips Button", action: #selector(toggleTipsButton), keyEquivalent: "")
+        let tipsMenuItem = NSMenuItem()
+        tipsMenuItem.submenu = tipsMenu
+        mainMenu.addItem(tipsMenuItem)
+
         // View menu
         let viewMenu = NSMenu(title: "View")
         viewMenu.addItem(withTitle: "Converter", action: #selector(showConverter), keyEquivalent: "1")
         viewMenu.addItem(withTitle: "Formats", action: #selector(showFormats), keyEquivalent: "2")
-        viewMenu.addItem(withTitle: "History", action: #selector(showHistory), keyEquivalent: "3")
-        viewMenu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "4")
-        viewMenu.addItem(withTitle: "Docs", action: #selector(showDocs), keyEquivalent: "5")
+        viewMenu.addItem(withTitle: "Presets", action: #selector(showPresets), keyEquivalent: "3")
+        viewMenu.addItem(withTitle: "History", action: #selector(showHistory), keyEquivalent: "4")
+        viewMenu.addItem(withTitle: "Settings", action: #selector(showSettings), keyEquivalent: "5")
         viewMenu.addItem(withTitle: "About", action: #selector(showAbout), keyEquivalent: "6")
         let viewMenuItem = NSMenuItem()
         viewMenuItem.submenu = viewMenu
@@ -597,8 +607,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
         // Help menu
         let helpMenu = NSMenu(title: "Help")
-        helpMenu.addItem(withTitle: "FinderConvert Docs", action: #selector(showDocs), keyEquivalent: "?")
-        helpMenu.addItem(NSMenuItem.separator())
         helpMenu.addItem(withTitle: "Enable Finder Extension", action: #selector(openExtensionSettings), keyEquivalent: "")
         let helpMenuItem = NSMenuItem()
         helpMenuItem.submenu = helpMenu
@@ -617,6 +625,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         navigateToTab(.formats)
     }
 
+    @objc func showPresets() {
+        openPreferencesWindow()
+        navigateToTab(.presets)
+    }
+
     @objc func showHistory() {
         openPreferencesWindow()
         navigateToTab(.history)
@@ -627,9 +640,22 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         navigateToTab(.settings)
     }
 
-    @objc func showDocs() {
+    @objc func showTips() {
         openPreferencesWindow()
-        navigateToTab(.docs)
+        NotificationCenter.default.post(name: .showTipsPopover, object: nil)
+    }
+
+    @objc func toggleTipsButton() {
+        let current = UserDefaults.standard.object(forKey: "showTipsCircle") as? Bool ?? true
+        UserDefaults.standard.set(!current, forKey: "showTipsCircle")
+    }
+
+    func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
+        if menuItem.action == #selector(toggleTipsButton) {
+            let shown = UserDefaults.standard.object(forKey: "showTipsCircle") as? Bool ?? true
+            menuItem.state = shown ? .on : .off
+        }
+        return true
     }
 
     @objc func showAbout() {
@@ -746,8 +772,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     private static let largeFileThreshold: Int64 = 1_000_000 // 1 MB
 
-    func runConversion(for urls: [URL], targetFormatId: String?, renameMap: [URL: String] = [:]) {
+    @discardableResult
+    func runConversion(for urls: [URL], targetFormatId: String?, renameMap: [URL: String] = [:], presetName: String? = nil) -> Task<Void, Never> {
         Task {
+            // Per-file preset: apply temporarily for this conversion only,
+            // restoring the user's settings when it finishes
+            var settingsSnapshot: Data?
+            if let presetName, let preset = PreferencesManager.shared.presetSettings(named: presetName) {
+                settingsSnapshot = PreferencesManager.shared.captureSettingsSnapshotData()
+                PreferencesManager.shared.applyPresetValues(preset)
+            }
+            defer {
+                if let settingsSnapshot {
+                    PreferencesManager.shared.restoreSettingsSnapshot(settingsSnapshot)
+                }
+            }
             do {
                 let outputs: [OutputFormat]
                 do {
@@ -940,9 +979,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 enum SidebarItem: String, CaseIterable, Identifiable {
     case converter = "Converter"
     case formats = "Formats"
+    case presets = "Presets"
     case history = "History"
     case settings = "Settings"
-    case docs = "Docs"
     case about = "About"
 
     var id: String { rawValue }
@@ -951,9 +990,9 @@ enum SidebarItem: String, CaseIterable, Identifiable {
         switch self {
         case .converter: return "arrow.triangle.2.circlepath"
         case .formats: return "checklist"
+        case .presets: return "slider.horizontal.2.square"
         case .history: return "clock.arrow.circlepath"
         case .settings: return "gearshape"
-        case .docs: return "book"
         case .about: return "info.circle"
         }
     }
@@ -964,6 +1003,8 @@ enum SidebarItem: String, CaseIterable, Identifiable {
 struct MainView: View {
     @ObservedObject var appDelegate: AppDelegate
     @State private var selectedItem: SidebarItem = .converter
+    @State private var showTips = false
+    @AppStorage("showTipsCircle") private var showTipsCircle = true
 
     var body: some View {
         NavigationSplitView {
@@ -975,24 +1016,58 @@ struct MainView: View {
                     ConverterTab(appDelegate: appDelegate)
                 case .formats:
                     FormatsTab()
+                case .presets:
+                    PresetsTab()
                 case .history:
                     HistoryTab(appDelegate: appDelegate)
                 case .settings:
                     SettingsTab()
-                case .docs:
-                    DocsTab()
                 case .about:
                     AboutTab()
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(.ultraThinMaterial)
+            .overlay(alignment: .bottomTrailing) {
+                ZStack(alignment: .bottomTrailing) {
+                    // Invisible popover anchor matching the button's frame so
+                    // the popover centers on the circle, and tips can still
+                    // open from the menu bar when the circle is hidden
+                    Color.clear
+                        .frame(width: 34, height: 34)
+                        .popover(isPresented: $showTips, arrowEdge: .top) {
+                            TipsPopover()
+                        }
+
+                    if showTipsCircle && selectedItem != .converter {
+                        Button {
+                            showTips.toggle()
+                        } label: {
+                            Image(systemName: "lightbulb.fill")
+                                .font(.system(size: 14, weight: .semibold))
+                                .foregroundStyle(.white)
+                                .frame(width: 34, height: 34)
+                                .background(Circle().fill(Color.accentColor))
+                                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Tips & Tricks — right-click to hide")
+                        .contextMenu {
+                            Button("Hide Tips Button") { showTipsCircle = false }
+                        }
+                    }
+                }
+                .padding(16)
+            }
         }
         .navigationSplitViewStyle(.balanced)
         .onReceive(NotificationCenter.default.publisher(for: .navigateToTab)) { notification in
             if let tab = notification.object as? SidebarItem {
                 selectedItem = tab
             }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showTipsPopover)) { _ in
+            showTips = true
         }
     }
 }
@@ -1021,22 +1096,30 @@ struct DroppedFileRow: View {
     let file: DroppedFile
     let availableFormats: [OutputFormat]
     let showFormatPicker: Bool
+    let presetNames: [String]
     let onRename: (String) -> Void
     let onFormatChange: (String?) -> Void
+    let onPresetChange: (String?) -> Void
     let onRemove: () -> Void
     @State private var editName: String
     @State private var fileFormat: String
+    @State private var filePreset: String?
 
     init(file: DroppedFile, availableFormats: [OutputFormat] = [], showFormatPicker: Bool = false,
-         onRename: @escaping (String) -> Void, onFormatChange: @escaping (String?) -> Void = { _ in }, onRemove: @escaping () -> Void) {
+         presetNames: [String] = [],
+         onRename: @escaping (String) -> Void, onFormatChange: @escaping (String?) -> Void = { _ in },
+         onPresetChange: @escaping (String?) -> Void = { _ in }, onRemove: @escaping () -> Void) {
         self.file = file
         self.availableFormats = availableFormats
         self.showFormatPicker = showFormatPicker
+        self.presetNames = presetNames
         self.onRename = onRename
         self.onFormatChange = onFormatChange
+        self.onPresetChange = onPresetChange
         self.onRemove = onRemove
         self._editName = State(initialValue: file.outputName)
         self._fileFormat = State(initialValue: file.formatOverride ?? "")
+        self._filePreset = State(initialValue: file.presetOverride)
     }
 
     var body: some View {
@@ -1070,6 +1153,33 @@ struct DroppedFileRow: View {
                     onFormatChange(val.isEmpty ? nil : val)
                 }
             }
+            if !presetNames.isEmpty {
+                Menu {
+                    Button {
+                        filePreset = nil
+                        onPresetChange(nil)
+                    } label: {
+                        Text(filePreset == nil ? "✓ Current settings" : "Current settings")
+                    }
+                    Divider()
+                    ForEach(presetNames, id: \.self) { name in
+                        Button {
+                            filePreset = name
+                            onPresetChange(name)
+                        } label: {
+                            Text(filePreset == name ? "✓ \(name)" : name)
+                        }
+                    }
+                } label: {
+                    Image(systemName: filePreset == nil ? "slider.horizontal.3" : "slider.horizontal.2.square")
+                        .font(.system(size: 10))
+                        .foregroundStyle(filePreset == nil ? Color.secondary : Color.accentColor)
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+                .help(filePreset.map { "Preset: \($0)" } ?? "Per-file preset")
+            }
             Button(action: onRemove) {
                 Image(systemName: "minus.circle")
                     .font(.system(size: 10))
@@ -1099,11 +1209,13 @@ struct DroppedFile: Identifiable, Equatable {
     let url: URL
     var outputName: String
     var formatOverride: String? // per-file format (nil = use global)
+    var presetOverride: String? // per-file preset (nil = current settings)
 
     init(url: URL) {
         self.url = url
         self.outputName = url.deletingPathExtension().lastPathComponent
         self.formatOverride = nil
+        self.presetOverride = nil
     }
 }
 
@@ -1120,8 +1232,40 @@ struct ConverterTab: View {
     @State private var activePresetName = ""
     @State private var convertedResults: [ConversionResult] = []
 
+    // Which file categories a preset's settings are meaningful for
+    private func presetCategories(_ s: PresetSettings) -> Set<FileCategory> {
+        var cats = Set<FileCategory>()
+        if s.jpegQuality != nil || s.heicQuality != nil || s.webpQuality != nil
+            || s.avifQuality != nil || s.resizePercent != nil || s.stripMetadata != nil {
+            cats.insert(.image)
+        }
+        if s.videoPreset != nil { cats.insert(.video) }
+        if s.audioBitrate != nil {
+            cats.insert(.audio)
+            cats.insert(.video) // audio extraction from video
+        }
+        return cats
+    }
+
+    private func fileCategory(_ url: URL) -> FileCategory? {
+        (try? FileTypeDetector().detect(url: url))?.category
+    }
+
+    private func presetNames(for category: FileCategory?) -> [String] {
+        guard let category else { return [] }
+        let builtIn = PresetSettings.builtIn
+            .filter { presetCategories($0.settings).contains(category) }
+            .map(\.name)
+        let user = PreferencesManager.shared.loadAllPresets()
+            .filter { presetCategories($0.value).contains(category) }
+            .keys.sorted()
+        return builtIn + user
+    }
+
     var body: some View {
         VStack(spacing: 0) {
+            Color.clear.frame(height: 0)
+                .onAppear { activePresetName = PreferencesManager.shared.activePresetName ?? "" }
             // Progress bar during conversion
             if appDelegate.activeConversion != nil {
                 HStack(spacing: 10) {
@@ -1266,6 +1410,7 @@ struct ConverterTab: View {
                                         file: file,
                                         availableFormats: availableFormats,
                                         showFormatPicker: droppedFiles.count > 1,
+                                        presetNames: presetNames(for: fileCategory(file.url)),
                                         onRename: { newName in
                                             if let idx = droppedFiles.firstIndex(where: { $0.id == file.id }) {
                                                 droppedFiles[idx].outputName = newName
@@ -1274,6 +1419,11 @@ struct ConverterTab: View {
                                         onFormatChange: { fmt in
                                             if let idx = droppedFiles.firstIndex(where: { $0.id == file.id }) {
                                                 droppedFiles[idx].formatOverride = fmt
+                                            }
+                                        },
+                                        onPresetChange: { preset in
+                                            if let idx = droppedFiles.firstIndex(where: { $0.id == file.id }) {
+                                                droppedFiles[idx].presetOverride = preset
                                             }
                                         },
                                         onRemove: {
@@ -1285,33 +1435,6 @@ struct ConverterTab: View {
                             }
                         }
 
-                        // Presets strip — only show relevant presets for dropped file types
-                        let fileCategories = droppedFileCategories()
-                        let relevantBuiltIn = PresetSettings.builtIn.filter { presetMatchesCategories($0.settings, fileCategories) }
-                        let userPresets = PreferencesManager.shared.loadAllPresets()
-                        let relevantUser = userPresets.filter { presetMatchesCategories($0.value, fileCategories) }
-
-                        if !relevantBuiltIn.isEmpty || !relevantUser.isEmpty {
-                            Divider().padding(.horizontal, 12).padding(.top, 4)
-
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 6) {
-                                    ForEach(relevantBuiltIn, id: \.name) { preset in
-                                        presetPill(name: preset.name, icon: preset.icon, settings: preset.settings)
-                                    }
-                                    if !relevantUser.isEmpty {
-                                        Divider().frame(height: 14)
-                                        ForEach(Array(relevantUser.keys.sorted()), id: \.self) { name in
-                                            if let p = relevantUser[name] {
-                                                presetPill(name: name, icon: "slider.horizontal.3", settings: p)
-                                            }
-                                        }
-                                    }
-                                }
-                                .padding(.horizontal, 12)
-                            }
-                            .padding(.vertical, 6)
-                        }
                     }
                 }
             }
@@ -1321,6 +1444,41 @@ struct ConverterTab: View {
                 handleDrop(providers: providers)
             }
             .animation(.easeInOut(duration: 0.2), value: isTargeted)
+
+            // Global presets strip under the drop zone — all presets when
+            // empty, narrowed to the dropped files' categories otherwise
+            let droppedCategories = Set(droppedFiles.compactMap { fileCategory($0.url) })
+            let visibleBuiltIn = droppedFiles.isEmpty
+                ? PresetSettings.builtIn
+                : PresetSettings.builtIn.filter { !presetCategories($0.settings).isDisjoint(with: droppedCategories) }
+            let visibleUser = droppedFiles.isEmpty
+                ? PreferencesManager.shared.loadAllPresets()
+                : PreferencesManager.shared.loadAllPresets().filter { !presetCategories($0.value).isDisjoint(with: droppedCategories) }
+
+            if !visibleBuiltIn.isEmpty || !visibleUser.isEmpty {
+                HStack(spacing: 10) {
+                    Text("Presets")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.tertiary)
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        HStack(spacing: 6) {
+                            ForEach(visibleBuiltIn, id: \.name) { preset in
+                                presetPill(name: preset.name, icon: preset.icon, settings: preset.settings)
+                            }
+                            if !visibleUser.isEmpty {
+                                Divider().frame(height: 14)
+                                ForEach(Array(visibleUser.keys.sorted()), id: \.self) { name in
+                                    if let p = visibleUser[name] {
+                                        presetPill(name: name, icon: "slider.horizontal.3", settings: p)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 10)
+            }
 
             Spacer(minLength: 8)
 
@@ -1424,10 +1582,15 @@ struct ConverterTab: View {
 
     private func presetPill(name: String, icon: String, settings: PresetSettings) -> some View {
         Button {
-            PreferencesManager.shared.applyPreset(settings)
-            withAnimation(.easeOut(duration: 0.2)) { activePresetName = name }
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
-                withAnimation { if activePresetName == name { activePresetName = "" } }
+            withAnimation(.easeOut(duration: 0.2)) {
+                if activePresetName == name {
+                    PreferencesManager.shared.unapplyActivePreset()
+                    activePresetName = ""
+                } else {
+                    let effective = PreferencesManager.shared.presetSettings(named: name) ?? settings
+                    PreferencesManager.shared.applyPreset(effective, named: name)
+                    activePresetName = name
+                }
             }
         } label: {
             HStack(spacing: 4) {
@@ -1445,34 +1608,6 @@ struct ConverterTab: View {
             .foregroundStyle(activePresetName == name ? Color.accentColor : .secondary)
         }
         .buttonStyle(.plain)
-    }
-
-    private func droppedFileCategories() -> Set<FileCategory> {
-        var categories = Set<FileCategory>()
-        let detector = FileTypeDetector()
-        for file in droppedFiles {
-            if let detected = try? detector.detect(url: file.url) {
-                categories.insert(detected.category)
-            }
-        }
-        return categories
-    }
-
-    private func presetMatchesCategories(_ preset: PresetSettings, _ categories: Set<FileCategory>) -> Bool {
-        let hasImageSettings = preset.jpegQuality != nil || preset.resizePercent != nil || preset.stripMetadata != nil
-        let hasVideoSettings = preset.videoPreset != nil
-        let hasAudioSettings = preset.audioBitrate != nil
-
-        // Pure image preset (no video/audio fields)
-        if hasImageSettings && !hasVideoSettings && !hasAudioSettings && categories.contains(.image) { return true }
-        // Pure video preset (no image fields)
-        if hasVideoSettings && !hasImageSettings && !hasAudioSettings && categories.contains(.video) { return true }
-        // Pure audio preset
-        if hasAudioSettings && !hasImageSettings && !hasVideoSettings && categories.contains(.audio) { return true }
-        // Video also shows for audio extraction
-        if hasVideoSettings && categories.contains(.video) { return true }
-        if hasAudioSettings && categories.contains(.audio) { return true }
-        return false
     }
 
     private func openFilePicker() {
@@ -1517,6 +1652,11 @@ struct ConverterTab: View {
         return true
     }
 
+    private struct ConversionGroup: Hashable {
+        let formatId: String
+        let presetName: String?
+    }
+
     private func convertFiles() {
         guard !droppedFiles.isEmpty else { return }
 
@@ -1528,16 +1668,28 @@ struct ConverterTab: View {
             }
         }
 
-        // Group files by their target format (per-file override or global)
-        var byFormat: [String: [URL]] = [:]
+        // Group files by target format and per-file preset
+        var groups: [ConversionGroup: [URL]] = [:]
         for file in droppedFiles {
-            let fmt = file.formatOverride ?? selectedFormatId
-            byFormat[fmt, default: []].append(file.url)
+            let key = ConversionGroup(
+                formatId: file.formatOverride ?? selectedFormatId,
+                presetName: file.presetOverride
+            )
+            groups[key, default: []].append(file.url)
         }
 
-        // Convert each group
-        for (formatId, urls) in byFormat {
-            appDelegate.runConversion(for: urls, targetFormatId: formatId, renameMap: renameMap)
+        // Run groups sequentially: per-file presets temporarily swap the
+        // global settings, so concurrent groups would race
+        let delegate = appDelegate
+        Task {
+            for (group, urls) in groups {
+                await delegate.runConversion(
+                    for: urls,
+                    targetFormatId: group.formatId,
+                    renameMap: renameMap,
+                    presetName: group.presetName
+                ).value
+            }
         }
 
         withAnimation(.easeOut(duration: 0.15)) {
@@ -1649,9 +1801,14 @@ struct FormatRowView: View {
     @State private var audioSampleRate: Int
     @State private var audioBitrate: Int
     @State private var stripMetadata: Bool
+    @State private var markdownStyle: MarkdownStyle
+
+    private var supportsMarkdownStyle: Bool {
+        format == .pdf || format == .html
+    }
 
     private var hasSettings: Bool {
-        format.supportsQuality || format.supportsResize || format.supportsVideoQuality || format.supportsAudioSampleRate || format.supportsAudioBitrate || format.category == .image
+        format.supportsQuality || format.supportsResize || format.supportsVideoQuality || format.supportsAudioSampleRate || format.supportsAudioBitrate || format.category == .image || supportsMarkdownStyle
     }
 
     init(format: OutputFormat, enabledFormats: Binding<[OutputFormat]>) {
@@ -1663,6 +1820,7 @@ struct FormatRowView: View {
         self._audioSampleRate = State(initialValue: PreferencesManager.shared.audioSampleRate(for: format))
         self._audioBitrate = State(initialValue: PreferencesManager.shared.audioBitrate(for: format))
         self._stripMetadata = State(initialValue: PreferencesManager.shared.stripMetadata(for: format))
+        self._markdownStyle = State(initialValue: PreferencesManager.shared.markdownStyle)
     }
 
     var body: some View {
@@ -1744,6 +1902,9 @@ struct FormatRowView: View {
         }
         if format.category == .image && stripMetadata {
             parts.append("strip")
+        }
+        if supportsMarkdownStyle && markdownStyle != .modern {
+            parts.append("md:\(markdownStyle.displayName.lowercased())")
         }
         return parts.joined(separator: " ")
     }
@@ -1863,6 +2024,26 @@ struct FormatRowView: View {
                     .onChange(of: stripMetadata) { _, val in
                         PreferencesManager.shared.setStripMetadata(val, for: format)
                     }
+            }
+
+            if supportsMarkdownStyle {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Markdown style")
+                        .font(.subheadline)
+                    Picker("", selection: $markdownStyle) {
+                        ForEach(MarkdownStyle.allCases, id: \.self) { style in
+                            Text(style.displayName).tag(style)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .onChange(of: markdownStyle) { _, val in
+                        PreferencesManager.shared.markdownStyle = val
+                    }
+                    Text("Used when converting .md files")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
             }
         }
         .padding(20)
@@ -2053,6 +2234,236 @@ struct HistoryTab: View {
     }
 }
 
+// MARK: - Settings components (shared by SettingsTab and PresetsTab)
+
+private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+    VStack(alignment: .leading, spacing: 0) {
+        HStack(spacing: 8) {
+            Image(systemName: icon)
+                .foregroundStyle(.secondary)
+                .frame(width: 18)
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 32)
+        .padding(.vertical, 10)
+
+        VStack(spacing: 0) {
+            content()
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                .strokeBorder(Color.primary.opacity(0.06))
+        )
+        .padding(.horizontal, 24)
+        .padding(.bottom, 16)
+    }
+}
+
+private func settingsRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
+    HStack(spacing: 12) {
+        content()
+    }
+    .padding(.horizontal, 16)
+    .padding(.vertical, 10)
+}
+
+// MARK: - Presets
+
+struct PresetsTab: View {
+    @State private var activePreset: String?
+    @State private var showCreatePreset = false
+    @State private var userPresets: [String: PresetSettings] = [:]
+    @State private var editingPreset: EditablePreset?
+    @State private var overridesVersion = 0
+
+    struct EditablePreset: Identifiable {
+        let name: String
+        let settings: PresetSettings
+        let isBuiltIn: Bool
+        var id: String { name }
+    }
+
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack {
+                    Text("Presets")
+                        .font(.title2.weight(.bold))
+                    Spacer()
+                    Button("New Preset") { showCreatePreset = true }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+                .padding(.horizontal, 32)
+                .padding(.top, 28)
+                .padding(.bottom, 6)
+
+                Text("Applying a preset updates quality, resize, and metadata settings across all matching formats. Unapply restores the settings you had before.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .padding(.horizontal, 32)
+                    .padding(.bottom, 20)
+
+                ForEach(PresetSettings.builtInGroups, id: \.title) { group in
+                    settingsSection(title: group.title.uppercased(), icon: group.icon) {
+                        ForEach(group.presets.indices, id: \.self) { i in
+                            if i > 0 { Divider().padding(.leading, 52) }
+                            presetRow(name: group.presets[i].name, icon: group.presets[i].icon, settings: group.presets[i].settings)
+                        }
+                    }
+                }
+
+                settingsSection(title: "MY PRESETS", icon: "person") {
+                    if userPresets.isEmpty {
+                        settingsRow {
+                            Text("No custom presets yet. Create one to save your favorite conversion settings.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                    } else {
+                        ForEach(Array(userPresets.keys.sorted().enumerated()), id: \.element) { i, name in
+                            if i > 0 { Divider().padding(.leading, 52) }
+                            settingsRow {
+                                Image(systemName: "slider.horizontal.3")
+                                    .foregroundStyle(.secondary)
+                                    .frame(width: 22)
+                                Text(name)
+                                    .font(.body)
+                                Spacer()
+                                Button {
+                                    if let p = PreferencesManager.shared.loadPreset(name: name) {
+                                        editingPreset = EditablePreset(name: name, settings: p, isBuiltIn: false)
+                                    }
+                                } label: {
+                                    Image(systemName: "pencil")
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                }
+                                .buttonStyle(.plain)
+                                .help("Edit preset")
+                                applyControls(for: name) {
+                                    if let p = PreferencesManager.shared.loadPreset(name: name) {
+                                        PreferencesManager.shared.applyPreset(p, named: name)
+                                        activePreset = name
+                                    }
+                                }
+                                Button {
+                                    if activePreset == name {
+                                        PreferencesManager.shared.unapplyActivePreset()
+                                        activePreset = nil
+                                    }
+                                    PreferencesManager.shared.deletePreset(name: name)
+                                    userPresets = PreferencesManager.shared.loadAllPresets()
+                                } label: {
+                                    Image(systemName: "trash")
+                                        .font(.caption)
+                                        .foregroundStyle(.red)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                    }
+                }
+            }
+            .padding(.bottom, 32)
+        }
+        .onAppear {
+            userPresets = PreferencesManager.shared.loadAllPresets()
+            activePreset = PreferencesManager.shared.activePresetName
+        }
+        .sheet(isPresented: $showCreatePreset) {
+            CreatePresetSheet(isPresented: $showCreatePreset)
+        }
+        .onChange(of: showCreatePreset) { _, isShown in
+            if !isShown { userPresets = PreferencesManager.shared.loadAllPresets() }
+        }
+        .sheet(item: $editingPreset) { preset in
+            EditPresetSheet(preset: preset) {
+                overridesVersion += 1
+                userPresets = PreferencesManager.shared.loadAllPresets()
+                // Keep settings in sync if the edited preset is currently applied
+                if activePreset == preset.name,
+                   let effective = PreferencesManager.shared.presetSettings(named: preset.name) {
+                    PreferencesManager.shared.applyPreset(effective, named: preset.name)
+                }
+            }
+        }
+        .id(overridesVersion)
+    }
+
+    private func presetRow(name: String, icon: String, settings: PresetSettings) -> some View {
+        let effective = PreferencesManager.shared.presetSettings(named: name) ?? settings
+        let isEdited = PreferencesManager.shared.builtInOverride(named: name) != nil
+        return settingsRow {
+            Image(systemName: icon)
+                .foregroundStyle(Color.accentColor)
+                .frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                HStack(spacing: 6) {
+                    Text(name)
+                        .font(.body)
+                    if isEdited {
+                        Text("edited")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(Color.accentColor.opacity(0.12)))
+                            .foregroundStyle(Color.accentColor)
+                    }
+                }
+                if let desc = settings.description {
+                    Text(desc)
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .lineLimit(2)
+                }
+            }
+            Spacer()
+            Button {
+                editingPreset = EditablePreset(name: name, settings: effective, isBuiltIn: true)
+            } label: {
+                Image(systemName: "pencil")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+            .help("Edit preset")
+            applyControls(for: name) {
+                PreferencesManager.shared.applyPreset(effective, named: name)
+                activePreset = name
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func applyControls(for name: String, apply: @escaping () -> Void) -> some View {
+        if activePreset == name {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.caption)
+            Button("Unapply") {
+                PreferencesManager.shared.unapplyActivePreset()
+                activePreset = nil
+            }
+            .font(.caption)
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+        } else {
+            Button("Apply") { apply() }
+                .font(.caption)
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+        }
+    }
+}
+
 // MARK: - Settings
 
 struct SettingsTab: View {
@@ -2060,13 +2471,7 @@ struct SettingsTab: View {
     @State private var useCustomOutput = PreferencesManager.shared.useCustomOutputFolder
     @State private var customOutputPath: String = PreferencesManager.shared.customOutputFolder?.path ?? ""
     @State private var showNotifications = true
-    @State private var activePreset: String = ""
-    @State private var showCreatePreset = false
-    @State private var newPresetName = ""
-    @State private var newPresetJpegQ: Double = 0.9
-    @State private var newPresetResize: Int = 100
-    @State private var newPresetStrip = false
-    @State private var newPresetVideo = "highest"
+    @AppStorage("showTipsCircle") private var showTipsCircle = true
 
     var body: some View {
         ScrollView {
@@ -2133,74 +2538,6 @@ struct SettingsTab: View {
                     }
                 }
 
-                // --- Presets ---
-                settingsSection(title: "PRESETS", icon: "slider.horizontal.2.square") {
-                    // Built-in presets
-                    ForEach(PresetSettings.builtIn.indices, id: \.self) { i in
-                        if i > 0 { Divider().padding(.leading, 52) }
-                        presetRow(name: PresetSettings.builtIn[i].name, icon: PresetSettings.builtIn[i].icon, settings: PresetSettings.builtIn[i].settings)
-                    }
-
-                    // User presets
-                    let userPresets = PreferencesManager.shared.loadAllPresets()
-                    if !userPresets.isEmpty {
-                        Divider().padding(.vertical, 4)
-                        HStack {
-                            Text("MY PRESETS")
-                                .font(.caption2.weight(.semibold))
-                                .foregroundStyle(.tertiary)
-                            Spacer()
-                        }
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 4)
-
-                        ForEach(Array(userPresets.keys.sorted()), id: \.self) { name in
-                            Divider().padding(.leading, 16)
-                            settingsRow {
-                                Image(systemName: "slider.horizontal.3")
-                                    .foregroundStyle(.secondary)
-                                    .frame(width: 22)
-                                Text(name)
-                                    .font(.body)
-                                Spacer()
-                                Button("Apply") {
-                                    if let p = PreferencesManager.shared.loadPreset(name: name) {
-                                        PreferencesManager.shared.applyPreset(p)
-                                        activePreset = name
-                                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { activePreset = "" }
-                                    }
-                                }
-                                .font(.caption)
-                                .buttonStyle(.bordered)
-                                .controlSize(.small)
-                                Button {
-                                    PreferencesManager.shared.deletePreset(name: name)
-                                } label: {
-                                    Image(systemName: "trash")
-                                        .font(.caption)
-                                        .foregroundStyle(.red)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-
-                    // Create new preset
-                    Divider().padding(.vertical, 4)
-                    settingsRow {
-                        Image(systemName: "plus.circle")
-                            .foregroundStyle(Color.accentColor)
-                            .frame(width: 22)
-                        Text("Create New Preset")
-                            .font(.body.weight(.medium))
-                        Spacer()
-                        Button("Create") { showCreatePreset = true }
-                            .font(.caption)
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                    }
-                }
-
                 // --- Notifications ---
                 settingsSection(title: "NOTIFICATIONS", icon: "bell") {
                     settingsRow {
@@ -2239,21 +2576,39 @@ struct SettingsTab: View {
                     }
                 }
 
+                // --- Tips ---
+                settingsSection(title: "TIPS", icon: "lightbulb") {
+                    settingsRow {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Show tips button")
+                                .font(.body)
+                            Text("Floating lightbulb in the corner of every tab except Converter. Also available from the Tips menu.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $showTipsCircle)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                    }
+                }
+
                 // --- Keyboard Shortcuts ---
                 settingsSection(title: "KEYBOARD SHORTCUTS", icon: "keyboard") {
                     shortcutRow("Switch to Converter", "Cmd + 1")
                     Divider().padding(.leading, 16)
                     shortcutRow("Switch to Formats", "Cmd + 2")
                     Divider().padding(.leading, 16)
-                    shortcutRow("Switch to History", "Cmd + 3")
+                    shortcutRow("Switch to Presets", "Cmd + 3")
                     Divider().padding(.leading, 16)
-                    shortcutRow("Switch to Settings", "Cmd + 4")
+                    shortcutRow("Switch to History", "Cmd + 4")
                     Divider().padding(.leading, 16)
-                    shortcutRow("Open Docs", "Cmd + 5")
+                    shortcutRow("Switch to Settings", "Cmd + 5")
                     Divider().padding(.leading, 16)
                     shortcutRow("Open Settings", "Cmd + ,")
                     Divider().padding(.leading, 16)
-                    shortcutRow("Open Help / Docs", "Cmd + ?")
+                    shortcutRow("Tips & Tricks", "Cmd + ?")
                 }
 
                 // --- About ---
@@ -2288,81 +2643,9 @@ struct SettingsTab: View {
             }
             .padding(.bottom, 32)
         }
-        .sheet(isPresented: $showCreatePreset) {
-            CreatePresetSheet(isPresented: $showCreatePreset)
-        }
-    }
-
-    private func presetRow(name: String, icon: String, settings: PresetSettings) -> some View {
-        settingsRow {
-            Image(systemName: icon)
-                .foregroundStyle(Color.accentColor)
-                .frame(width: 22)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(name)
-                    .font(.body)
-                if let desc = settings.description {
-                    Text(desc)
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                        .lineLimit(2)
-                }
-            }
-            Spacer()
-            Button("Apply") {
-                PreferencesManager.shared.applyPreset(settings)
-                activePreset = name
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { activePreset = "" }
-            }
-            .font(.caption)
-            .buttonStyle(.bordered)
-            .controlSize(.small)
-            if activePreset == name {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.caption)
-            }
-        }
     }
 
     // MARK: - Components
-
-    private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 8) {
-                Image(systemName: icon)
-                    .foregroundStyle(.secondary)
-                    .frame(width: 18)
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-            .padding(.horizontal, 32)
-            .padding(.vertical, 10)
-
-            VStack(spacing: 0) {
-                content()
-            }
-            .background(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.5))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.06))
-            )
-            .padding(.horizontal, 24)
-            .padding(.bottom, 16)
-        }
-    }
-
-    private func settingsRow<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        HStack(spacing: 12) {
-            content()
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
 
     private func shortcutRow(_ action: String, _ shortcut: String) -> some View {
         settingsRow {
@@ -2887,407 +3170,371 @@ struct CreatePresetSheet: View {
     }
 }
 
-// MARK: - Docs
+// MARK: - Edit Preset
 
-struct DocsTab: View {
-    @State private var selectedSection: DocSection = .gettingStarted
+struct EditPresetSheet: View {
+    let preset: PresetsTab.EditablePreset
+    let onDone: () -> Void
+    @Environment(\.dismiss) private var dismiss
 
-    enum DocSection: String, CaseIterable, Identifiable {
-        case gettingStarted = "Getting Started"
-        case finderMenu = "Finder Menu"
-        case imageConversion = "Images"
-        case videoAudio = "Video & Audio"
-        case documents = "Documents"
-        case spreadsheets = "Spreadsheets"
-        case folders = "Folders"
-        case pdfTools = "PDF Tools"
-        case settings = "Settings"
-        case tips = "Tips & Tricks"
+    @State private var quality: Double
+    @State private var resize: Int
+    @State private var stripMeta: Bool
+    @State private var videoPreset: String
+    @State private var audioBitrate: Int
 
-        var id: String { rawValue }
-        var icon: String {
-            switch self {
-            case .gettingStarted: return "star"
-            case .finderMenu: return "cursorarrow.click"
-            case .imageConversion: return "photo"
-            case .videoAudio: return "film"
-            case .documents: return "doc.text"
-            case .spreadsheets: return "tablecells"
-            case .folders: return "folder"
-            case .pdfTools: return "doc.on.doc"
-            case .settings: return "slider.horizontal.3"
-            case .tips: return "lightbulb"
-            }
-        }
+    private let hasQuality: Bool
+    private let hasResize: Bool
+    private let hasStrip: Bool
+    private let hasVideo: Bool
+    private let hasBitrate: Bool
+
+    init(preset: PresetsTab.EditablePreset, onDone: @escaping () -> Void) {
+        self.preset = preset
+        self.onDone = onDone
+        let s = preset.settings
+        hasQuality = s.jpegQuality != nil || s.heicQuality != nil || s.webpQuality != nil || s.avifQuality != nil
+        hasResize = s.resizePercent != nil
+        hasStrip = s.stripMetadata != nil
+        hasVideo = s.videoPreset != nil
+        hasBitrate = s.audioBitrate != nil
+        self._quality = State(initialValue: s.jpegQuality ?? s.heicQuality ?? s.webpQuality ?? s.avifQuality ?? 0.9)
+        self._resize = State(initialValue: s.resizePercent ?? 100)
+        self._stripMeta = State(initialValue: s.stripMetadata ?? false)
+        self._videoPreset = State(initialValue: s.videoPreset ?? "highest")
+        self._audioBitrate = State(initialValue: s.audioBitrate ?? 128000)
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            // Topic list
-            ScrollView {
-                VStack(alignment: .leading, spacing: 2) {
-                    ForEach(DocSection.allCases) { section in
-                        Button {
-                            withAnimation(.easeOut(duration: 0.15)) { selectedSection = section }
-                        } label: {
-                            HStack(spacing: 8) {
-                                Image(systemName: section.icon)
-                                    .font(.system(size: 12))
-                                    .foregroundStyle(selectedSection == section ? Color.accentColor : .secondary)
-                                    .frame(width: 18)
-                                Text(section.rawValue)
-                                    .font(.subheadline)
-                                    .foregroundStyle(selectedSection == section ? .primary : .secondary)
-                                Spacer()
-                            }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 7)
-                            .background(
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(selectedSection == section ? Color.accentColor.opacity(0.1) : Color.clear)
-                            )
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
+        VStack(alignment: .leading, spacing: 16) {
+            Text("Edit \(preset.name)").font(.title3.weight(.bold))
+            if let desc = preset.settings.description {
+                Text(desc)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if hasQuality {
+                VStack(alignment: .leading, spacing: 8) {
+                    HStack {
+                        Text("Image quality").font(.subheadline)
+                        Spacer()
+                        Text("\(Int(quality * 100))%")
+                            .font(.system(.subheadline, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                    }
+                    Slider(value: $quality, in: 0.1...1.0, step: 0.05)
+                }
+            }
+
+            if hasResize {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Resize").font(.subheadline)
+                    Picker("", selection: $resize) {
+                        Text("100%").tag(100)
+                        Text("75%").tag(75)
+                        Text("50%").tag(50)
+                        Text("25%").tag(25)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+            }
+
+            if hasStrip {
+                Toggle("Strip metadata (EXIF / GPS)", isOn: $stripMeta)
+                    .font(.subheadline)
+            }
+
+            if hasVideo {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Video quality").font(.subheadline)
+                    Picker("", selection: $videoPreset) {
+                        Text("Highest").tag("highest")
+                        Text("High").tag("high")
+                        Text("Medium").tag("medium")
+                        Text("Low").tag("low")
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+            }
+
+            if hasBitrate {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Audio bitrate").font(.subheadline)
+                    Picker("", selection: $audioBitrate) {
+                        Text("64").tag(64000)
+                        Text("128").tag(128000)
+                        Text("192").tag(192000)
+                        Text("256").tag(256000)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+            }
+
+            HStack {
+                if preset.isBuiltIn && PreferencesManager.shared.builtInOverride(named: preset.name) != nil {
+                    Button("Reset to Default") {
+                        PreferencesManager.shared.clearBuiltInOverride(named: preset.name)
+                        onDone()
+                        dismiss()
                     }
                 }
-                .padding(12)
+                Spacer()
+                Button("Cancel") { dismiss() }
+                    .keyboardShortcut(.cancelAction)
+                Button("Save") { save() }
+                    .keyboardShortcut(.defaultAction)
+                    .buttonStyle(.borderedProminent)
             }
-            .frame(width: 160)
-            .background(Color.primary.opacity(0.03))
+            .padding(.top, 4)
+        }
+        .padding(24)
+        .frame(width: 340)
+    }
+
+    private func save() {
+        var s = preset.settings
+        if hasQuality {
+            if s.jpegQuality != nil { s.jpegQuality = quality }
+            if s.heicQuality != nil { s.heicQuality = quality }
+            if s.webpQuality != nil { s.webpQuality = quality }
+            if s.avifQuality != nil { s.avifQuality = quality }
+        }
+        if hasResize { s.resizePercent = resize }
+        if hasStrip { s.stripMetadata = stripMeta }
+        if hasVideo { s.videoPreset = videoPreset }
+        if hasBitrate { s.audioBitrate = audioBitrate }
+
+        if preset.isBuiltIn {
+            PreferencesManager.shared.setBuiltInOverride(s, named: preset.name)
+        } else {
+            PreferencesManager.shared.savePreset(name: preset.name, settings: s)
+        }
+        onDone()
+        dismiss()
+    }
+}
+
+// MARK: - Tips & Tricks
+
+struct TipsPopover: View {
+    private struct Tip {
+        let icon: String
+        let title: String
+        let text: String
+    }
+
+    private let tips: [Tip] = [
+        Tip(icon: "cursorarrow.click", title: "Convert from Finder",
+            text: "Right-click any file in Finder and pick a format from Convert File. No need to open the app."),
+        Tip(icon: "square.stack.3d.up", title: "Batch convert",
+            text: "Select multiple files at once — the menu only shows formats compatible with all of them."),
+        Tip(icon: "folder", title: "Convert whole folders",
+            text: "Right-click a folder to convert everything inside recursively, mirroring the structure."),
+        Tip(icon: "doc.on.doc", title: "Merge & split PDFs",
+            text: "Select 2+ PDFs and right-click to merge. Right-click a single PDF to split it into pages."),
+        Tip(icon: "waveform", title: "Extract audio from video",
+            text: "Right-click a video and choose MP3 or M4A to pull out just the audio track."),
+        Tip(icon: "photo.stack", title: "Video to GIF",
+            text: "Convert any video to an animated GIF — great for quick shares and bug reports."),
+        Tip(icon: "globe", title: "Instant favicon",
+            text: "Convert any image to ICO and it is auto-resized to 256×256, ready for the web."),
+        Tip(icon: "doc.richtext", title: "Styled Markdown PDFs",
+            text: "Pick Modern, Serif, GitHub, or Plain styling for .md conversions in the .pdf format settings."),
+        Tip(icon: "slider.horizontal.2.square", title: "One-click presets",
+            text: "The Presets tab (Cmd+3) applies quality, resize, and metadata profiles across all formats at once."),
+        Tip(icon: "tablecells", title: "Multi-sheet spreadsheets",
+            text: "An XLSX with several sheets converts to a folder with one clean CSV per sheet."),
+        Tip(icon: "clock.arrow.circlepath", title: "Undo a conversion",
+            text: "The History tab lists every output — click the trash icon to move one to the Trash."),
+        Tip(icon: "keyboard", title: "Fast navigation",
+            text: "Cmd+1...6 switches tabs. The app keeps working in the background after you close the window."),
+    ]
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "lightbulb.fill")
+                    .foregroundStyle(Color.accentColor)
+                Text("Tips & Tricks")
+                    .font(.headline)
+            }
+            .padding(.horizontal, 16)
+            .padding(.top, 14)
+            .padding(.bottom, 10)
 
             Divider()
 
-            // Content
             ScrollView {
-                docContent(for: selectedSection)
-                    .padding(24)
-                    .padding(.bottom, 32)
+                VStack(alignment: .leading, spacing: 14) {
+                    ForEach(tips.indices, id: \.self) { i in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: tips[i].icon)
+                                .font(.system(size: 13))
+                                .foregroundStyle(Color.accentColor)
+                                .frame(width: 20)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(tips[i].title)
+                                    .font(.subheadline.weight(.semibold))
+                                Text(tips[i].text)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                    }
+                }
+                .padding(16)
             }
         }
-    }
-
-    @ViewBuilder
-    private func docContent(for section: DocSection) -> some View {
-        switch section {
-        case .gettingStarted:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Quick Start")
-                    docStep(1, "Enable the Finder Extension",
-                            "Go to **System Settings > Privacy & Security > Extensions > Finder Extensions** and toggle on **FinderConvert**.")
-                    docStep(2, "Right-Click Any File",
-                            "Select one or more files in Finder, right-click, and look for **Convert File** in the context menu.")
-                    docStep(3, "Choose Your Format",
-                            "Pick the target format from the submenu. The converted file appears beside the original.")
-                    docStep(4, "Or Drag & Drop",
-                            "Open FinderConvert, drag files onto the **Converter** tab, choose a format, and click **Convert**.")
-                    docNote("The app stays running in the background to handle conversions from Finder. You don't need to keep the window open.")
-                }
-            }
-
-        case .finderMenu:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Finder Right-Click Menu")
-                    docText("When you right-click files in Finder, FinderConvert shows context-aware options:")
-                    docBullet("**Convert File** -- for a single file, shows all compatible output formats")
-                    docBullet("**Convert 3 Files** -- for multiple files, shows formats common to all")
-                    docBullet("**Convert Folder** -- for a folder, converts all files inside recursively")
-                    docBullet("**Merge PDFs** -- appears when 2+ PDF files are selected")
-                    docBullet("**Split PDF** -- appears when a single PDF is selected")
-                    docNote("Only formats that are actually supported for your selection appear. A .mov file won't show image formats unless you also select images.")
-                }
-            }
-
-        case .imageConversion:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Image Conversion")
-                    docText("Supported inputs: **JPEG, PNG, HEIC, TIFF, GIF, WebP, BMP, SVG, AVIF**")
-                    docText("Supported outputs: **JPEG, PNG, HEIC, TIFF, GIF, BMP, ICO, AVIF, WebP**")
-
-                    Divider()
-                    docSubheading("Per-Format Settings")
-                    docBullet("**Quality** -- JPEG, HEIC, AVIF, WebP have a quality slider (10-100%)")
-                    docBullet("**Resize** -- All image formats can resize to 75%, 50%, or 25%")
-                    docBullet("**Strip Metadata** -- Remove EXIF/GPS data from output")
-
-                    Divider()
-                    docSubheading("Special Conversions")
-                    docBullet("**SVG to raster** -- Renders vector at 1024px+ resolution")
-                    docBullet("**Any image to ICO** -- Auto-resizes to 256x256 for favicons")
-                    docBullet("**PDF to images** -- Multi-page PDFs create one image per page in a folder")
-                }
-            }
-
-        case .videoAudio:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Video & Audio")
-                    docText("**Video inputs:** MP4, MOV, WebM")
-                    docText("**Video outputs:** MP4, MOV, HEVC")
-                    docText("**Audio inputs:** MP3, M4A, WAV, AIFF, FLAC, OGG")
-                    docText("**Audio outputs:** MP3, M4A, WAV, AIFF, FLAC")
-
-                    Divider()
-                    docSubheading("Extract Audio from Video")
-                    docText("Right-click any video file and choose M4A, MP3, WAV, AIFF, or FLAC to extract just the audio track.")
-                    docNote("The video must have an audio track. Screen recordings without a microphone won't have audio to extract.")
-
-                    Divider()
-                    docSubheading("Video to GIF")
-                    docText("Convert any video to an animated GIF. The output is capped at 480px wide and 200 frames (10fps).")
-
-                    Divider()
-                    docSubheading("Settings")
-                    docBullet("**Video quality** -- Highest, High, Medium, Low presets")
-                    docBullet("**Audio bitrate** -- 64, 128, 192, 256 kbps (MP3, M4A)")
-                    docBullet("**Sample rate** -- 22.05, 44.1, 48 kHz")
-                }
-            }
-
-        case .documents:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Document Conversion")
-                    docText("**Inputs:** PDF, RTF, HTML, TXT, Markdown (.md), DOCX, EPUB")
-                    docText("**Outputs:** PDF, RTF, HTML, TXT, DOCX")
-
-                    Divider()
-                    docSubheading("Markdown")
-                    docText("Renders headings, **bold**, *italic*, `code`, lists, blockquotes, and links. HTML output includes clean CSS styling.")
-
-                    Divider()
-                    docSubheading("EPUB")
-                    docText("Parses chapter order from the EPUB spine. Outputs as PDF (via WebKit rendering), HTML, or plain text.")
-
-                    Divider()
-                    docSubheading("DOCX Output")
-                    docText("Creates valid Word documents from TXT, RTF, HTML, or Markdown. Preserves bold and italic formatting.")
-                }
-            }
-
-        case .spreadsheets:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Spreadsheets & Data")
-                    docText("**Inputs:** CSV, TSV, XLSX, JSON")
-                    docText("**Outputs:** CSV, TSV, XLSX")
-
-                    Divider()
-                    docSubheading("Multi-Sheet XLSX")
-                    docText("When converting an XLSX with multiple sheets to CSV/TSV, each sheet becomes a separate file inside a folder named after the original file.")
-                    docBullet("Single sheet: one flat CSV file")
-                    docBullet("Multiple sheets: folder with one CSV per sheet, named after the sheet")
-
-                    Divider()
-                    docSubheading("JSON to CSV")
-                    docText("Flattens arrays of JSON objects into rows. Object keys become column headers. Nested objects are serialized as JSON strings in cells.")
-                }
-            }
-
-        case .folders:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Folder Conversion")
-                    docText("Right-click any folder and choose a format. FinderConvert will:")
-                    docBullet("Recursively find all convertible files inside the folder")
-                    docBullet("Create a **\"folder converted\"** directory beside the original")
-                    docBullet("Mirror the entire directory structure with converted files")
-                    docBullet("Skip files that don't support the chosen output format")
-                    docNote("Hidden files (starting with .) are skipped. The original folder is never modified.")
-                }
-            }
-
-        case .pdfTools:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("PDF Tools")
-
-                    docSubheading("Merge PDFs")
-                    docText("Select 2 or more PDF files in Finder, right-click, and choose **Merge PDFs**. Pages are combined in selection order.")
-
-                    Divider()
-                    docSubheading("Split PDF")
-                    docText("Right-click a single PDF and choose **Split PDF**. Creates a folder with one PDF per page, zero-padded for sorting (Page 01, Page 02...).")
-
-                    Divider()
-                    docSubheading("PDF to Images")
-                    docText("Convert a PDF to JPEG, PNG, HEIC, or TIFF. Multi-page PDFs produce one image per page in a folder. Single-page PDFs produce a single image file.")
-                }
-            }
-
-        case .settings:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Settings & Customization")
-
-                    docSubheading("Per-Format Quality")
-                    docText("Click the slider icon next to any format in the **Formats** tab to adjust quality, resize, bitrate, or sample rate for that specific format.")
-
-                    Divider()
-                    docSubheading("Output Suffix")
-                    docText("Change the default \" converted\" suffix in the **Converter** tab. Set it to empty for no suffix (uses collision numbering instead).")
-
-                    Divider()
-                    docSubheading("Custom Output Folder")
-                    docText("Toggle the switch in the **Converter** tab and choose a folder. All conversions will output there instead of beside the source file.")
-
-                    Divider()
-                    docSubheading("Preset Profiles")
-                    docText("Save your current quality/resize/video settings as a named preset from the **Presets** menu. Apply presets instantly before converting.")
-
-                    Divider()
-                    docSubheading("Metadata Stripping")
-                    docText("Enable per-format in the format settings popover. Removes EXIF, GPS, camera info, and other metadata from images.")
-                }
-            }
-
-        case .tips:
-            docCard {
-                VStack(alignment: .leading, spacing: 16) {
-                    docHeading("Tips & Tricks")
-                    docBullet("**Batch convert** -- Select multiple files of different types. The menu shows formats compatible with all of them.")
-                    docBullet("**Quick favicon** -- Right-click any image > ICO. Auto-resizes to 256x256.")
-                    docBullet("**Web-ready images** -- Set JPEG quality to 70% and resize to 50% for fast-loading web images.")
-                    docBullet("**Extract podcast audio** -- Right-click a video > MP3 to get just the audio.")
-                    docBullet("**Convert clipboard** -- Drag & drop from other apps directly into the Converter tab.")
-                    docBullet("**XLSX to clean CSV** -- Multi-sheet spreadsheets automatically split into separate, properly named CSV files.")
-                    docBullet("**Undo mistakes** -- Go to the **History** tab and click the trash icon to move any conversion output to Trash.")
-
-                    Divider()
-                    docSubheading("Keyboard Shortcuts")
-                    docBullet("**Cmd+1/2/3/4/5** -- Switch between sidebar tabs")
-                    docBullet("**Cmd+Q** -- Quit (app stays in background for Finder conversions)")
-                }
-            }
-        }
-    }
-
-    // MARK: - Doc Components
-
-    private func docCard<Content: View>(@ViewBuilder content: () -> Content) -> some View {
-        content()
-            .padding(20)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .fill(Color(nsColor: .controlBackgroundColor).opacity(0.4))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 12, style: .continuous)
-                    .strokeBorder(Color.primary.opacity(0.05))
-            )
-    }
-
-    private func docHeading(_ text: String) -> some View {
-        Text(text)
-            .font(.title3.weight(.bold))
-    }
-
-    private func docSubheading(_ text: String) -> some View {
-        Text(text)
-            .font(.headline)
-    }
-
-    private func docText(_ text: LocalizedStringKey) -> some View {
-        Text(text)
-            .font(.body)
-            .foregroundStyle(.secondary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func docBullet(_ text: LocalizedStringKey) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Text("\u{2022}")
-                .foregroundStyle(.tertiary)
-            Text(text)
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    private func docStep(_ number: Int, _ title: String, _ description: LocalizedStringKey) -> some View {
-        HStack(alignment: .top, spacing: 12) {
-            Text("\(number)")
-                .font(.caption.weight(.bold))
-                .foregroundStyle(.white)
-                .frame(width: 22, height: 22)
-                .background(Circle().fill(Color.accentColor))
-            VStack(alignment: .leading, spacing: 4) {
-                Text(title)
-                    .font(.subheadline.weight(.semibold))
-                Text(description)
-                    .font(.subheadline)
-                    .foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    private func docNote(_ text: LocalizedStringKey) -> some View {
-        HStack(alignment: .top, spacing: 8) {
-            Image(systemName: "info.circle.fill")
-                .foregroundStyle(.blue)
-                .font(.subheadline)
-            Text(text)
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(12)
-        .background(
-            RoundedRectangle(cornerRadius: 8, style: .continuous)
-                .fill(Color.blue.opacity(0.06))
-        )
+        .frame(width: 320, height: 400)
     }
 }
 
 // MARK: - About
 
 struct AboutTab: View {
+    @State private var historyEntries: [ConversionHistoryEntry] = []
+
+    private struct TypeStat: Identifiable {
+        let id: String
+        let count: Int
+    }
+
+    private var successfulEntries: [ConversionHistoryEntry] {
+        historyEntries.filter(\.success)
+    }
+
+    private var filesConverted: Int {
+        successfulEntries.reduce(0) { $0 + max($1.inputFiles.count, 1) }
+    }
+
+    private var successRate: Int {
+        historyEntries.isEmpty ? 0 : Int((Double(successfulEntries.count) / Double(historyEntries.count) * 100).rounded())
+    }
+
+    private var typeStats: [TypeStat] {
+        let counts = Dictionary(grouping: successfulEntries, by: { $0.outputFormat.uppercased() })
+            .mapValues(\.count)
+        let sorted = counts.sorted { $0.value > $1.value || ($0.value == $1.value && $0.key < $1.key) }
+        var stats = sorted.prefix(5).map { TypeStat(id: $0.key, count: $0.value) }
+        let rest = sorted.dropFirst(5).reduce(0) { $0 + $1.value }
+        if rest > 0 { stats.append(TypeStat(id: "Other", count: rest)) }
+        return stats
+    }
+
     var body: some View {
-        VStack(spacing: 20) {
-            Spacer()
+        ScrollView {
+            VStack(spacing: 20) {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size: 64))
+                    .foregroundStyle(.tint)
+                    .symbolRenderingMode(.hierarchical)
+                    .padding(.top, 24)
 
-            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                .font(.system(size: 64))
-                .foregroundStyle(.tint)
-                .symbolRenderingMode(.hierarchical)
+                Text("FinderConvert")
+                    .font(.title.weight(.bold))
 
-            Text("FinderConvert")
-                .font(.title.weight(.bold))
+                Text("1.0.0")
+                    .font(.subheadline.weight(.medium))
+                    .foregroundStyle(.tertiary)
+                    .padding(.top, -14)
 
-            Text("1.0.0")
-                .font(.subheadline.weight(.medium))
-                .foregroundStyle(.tertiary)
-                .padding(.top, -14)
+                Text("A native macOS utility for converting files\ndirectly from Finder's right-click menu.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(3)
 
-            Text("A native macOS utility for converting files\ndirectly from Finder's right-click menu.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(3)
+                GroupBox {
+                    if historyEntries.isEmpty {
+                        Text("No conversions yet — stats will appear here.")
+                            .font(.subheadline)
+                            .foregroundStyle(.tertiary)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .padding(.vertical, 12)
+                    } else {
+                        VStack(alignment: .leading, spacing: 14) {
+                            HStack(spacing: 0) {
+                                statTile(value: "\(successfulEntries.count)", label: "Conversions")
+                                Divider().frame(height: 28)
+                                statTile(value: "\(filesConverted)", label: "Files")
+                                Divider().frame(height: 28)
+                                statTile(value: "\(successRate)%", label: "Success")
+                            }
 
-            Spacer()
+                            Divider()
 
-            GroupBox {
-                VStack(alignment: .leading, spacing: 10) {
-                    instructionRow(step: "1", text: "Right-click any file in Finder")
-                    instructionRow(step: "2", text: "Choose **Convert File** from the menu")
-                    instructionRow(step: "3", text: "Pick your target format")
+                            typeChart
+
+                            Text("Based on your last \(historyEntries.count) conversions.")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        .padding(4)
+                    }
+                } label: {
+                    Label("Your Stats", systemImage: "chart.bar")
                 }
-                .padding(4)
-            } label: {
-                Label("How to use", systemImage: "questionmark.circle")
-            }
-            .frame(maxWidth: 340)
+                .frame(maxWidth: 340)
 
-            Spacer()
+                GroupBox {
+                    VStack(alignment: .leading, spacing: 10) {
+                        instructionRow(step: "1", text: "Right-click any file in Finder")
+                        instructionRow(step: "2", text: "Choose **Convert File** from the menu")
+                        instructionRow(step: "3", text: "Pick your target format")
+                    }
+                    .padding(4)
+                } label: {
+                    Label("How to use", systemImage: "questionmark.circle")
+                }
+                .frame(maxWidth: 340)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(32)
         }
-        .padding(32)
+        .onAppear { historyEntries = ConversionHistoryStore.shared.entries }
+    }
+
+    private var typeChart: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("BY TYPE")
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.tertiary)
+            let maxCount = typeStats.map(\.count).max() ?? 1
+            ForEach(typeStats) { stat in
+                HStack(spacing: 8) {
+                    Text(stat.id)
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 48, alignment: .trailing)
+                    GeometryReader { geo in
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(Color.accentColor)
+                            .frame(width: max(geo.size.width * CGFloat(stat.count) / CGFloat(maxCount), 4))
+                    }
+                    .frame(height: 8)
+                    Text("\(stat.count)")
+                        .font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
+                        .frame(width: 30, alignment: .leading)
+                }
+            }
+        }
+    }
+
+    private func statTile(value: String, label: String) -> some View {
+        VStack(spacing: 2) {
+            Text(value)
+                .font(.title3.weight(.bold).monospacedDigit())
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+        .frame(maxWidth: .infinity)
     }
 
     private func instructionRow(step: String, text: LocalizedStringKey) -> some View {
