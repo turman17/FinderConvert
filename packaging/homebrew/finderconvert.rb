@@ -10,14 +10,14 @@
 # prints both).
 cask "finderconvert" do
   version "1.0.3"
-  sha256 "REPLACE_WITH_SHA256_FROM_RELEASE_SCRIPT"
+  sha256 "9cc6a4092a8495f3280a2a81e0889436c8ac5a438acfaa67e69e9e0af2e9d95b"
 
   url "https://github.com/turman17/FinderConvert/releases/download/v#{version}/FinderConvert-v#{version}.zip"
   name "FinderConvert"
   desc "File converter in Finder's right-click menu"
   homepage "https://github.com/turman17/FinderConvert"
 
-  depends_on macos: ">= :sonoma"
+  depends_on macos: :sonoma
 
   app "FinderConvert.app"
 
