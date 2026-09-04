@@ -33,10 +33,10 @@ public actor UpdateChecker {
     public static let shared = UpdateChecker()
 
     private let logger = Logger(subsystem: "FinderConvert", category: "update-checker")
-    // Change this to your GitHub repo
     private let repoOwner = "turman17"
     private let repoName = "FinderConvert"
-    private let currentVersion = "1.0.0"
+    private let currentVersion =
+        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "1.0.0"
 
     public init() {}
 

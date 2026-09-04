@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="FinderConvert"
-VERSION="1.0.0"
+VERSION="${VERSION:-1.0.3}"
 DMG_NAME="${APP_NAME}-v${VERSION}"
 DMG_OUTPUT="$HOME/Desktop/${DMG_NAME}.dmg"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -37,6 +37,12 @@ create-dmg \
 
 rm -rf "$STAGING"
 
+# Zip for in-app auto-updates (UpdateInstaller downloads this asset)
+ZIP_OUTPUT="$HOME/Desktop/${DMG_NAME}.zip"
+rm -f "$ZIP_OUTPUT"
+ditto -c -k --keepParent "/Applications/${APP_NAME}.app" "$ZIP_OUTPUT"
+
 echo ""
 echo "✅ DMG created: $DMG_OUTPUT"
-ls -lh "$DMG_OUTPUT"
+echo "✅ ZIP created: $ZIP_OUTPUT"
+ls -lh "$DMG_OUTPUT" "$ZIP_OUTPUT"
