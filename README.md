@@ -4,6 +4,12 @@ A native macOS utility that adds file conversion directly to Finder's right-clic
 
 Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus two small static libraries (LAME for MP3, libwebp for WebP) — no ffmpeg, no Electron, a few MB total.
 
+![Convert File in Finder's right-click menu](docs/screenshots/finder-menu.jpg)
+
+| Drag & drop converter | Menu bar quick convert |
+|---|---|
+| ![Main app window with drop zone and presets](docs/screenshots/app.jpg) | ![Menu bar popover](docs/screenshots/menubar.jpg) |
+
 ## Install
 
 ### Homebrew
