@@ -66,9 +66,10 @@ public actor NativeImageConversionEngine: ConversionEngine {
                 throw ConversionError.failedToDecodeImage
             }
 
-            // Apply per-format resize if configured
+            // Apply per-format resize if configured (except ICO, which is
+            // always rendered at the fixed 256x256 icon size)
             let resizePercent = PreferencesManager.shared.resizePercent(for: job.requestedOutput)
-            if resizePercent > 0 && resizePercent < 100 {
+            if resizePercent > 0 && resizePercent < 100 && job.requestedOutput != .ico {
                 let scale = Double(resizePercent) / 100.0
                 let newW = max(1, Int(Double(image.width) * scale))
                 let newH = max(1, Int(Double(image.height) * scale))
@@ -119,8 +120,10 @@ public actor NativeImageConversionEngine: ConversionEngine {
                 let flattened = try flattenIfNeeded(image)
                 try writeImage(flattened, source: source, outputFormat: .bmp, utType: .bmp, destinationURL: tempURL)
             case .ico:
-                let resized = try resizeImage(image, maxSize: 256)
-                let flattened = try flattenIfNeeded(resized)
+                // ImageIO's ICO encoder only accepts standard icon sizes, so
+                // render onto an exact 256x256 square canvas (aspect-fit)
+                let squared = try squareCanvas(image, size: 256)
+                let flattened = try flattenIfNeeded(squared)
                 let icoType = UTType("com.microsoft.ico") ?? .image
                 try writeImage(flattened, source: source, outputFormat: .ico, utType: icoType, destinationURL: tempURL)
             case .avif:
@@ -196,26 +199,22 @@ public actor NativeImageConversionEngine: ConversionEngine {
         return flattened
     }
 
-    private func resizeImage(_ image: CGImage, maxSize: Int) throws -> CGImage {
-        let w = image.width
-        let h = image.height
-        guard w > maxSize || h > maxSize else { return image }
-
-        let scale = Double(maxSize) / Double(max(w, h))
-        let newW = Int(Double(w) * scale)
-        let newH = Int(Double(h) * scale)
-
+    // Aspect-fit the image centered on a fixed square canvas
+    private func squareCanvas(_ image: CGImage, size: Int) throws -> CGImage {
         guard let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
-              let context = CGContext(data: nil, width: newW, height: newH, bitsPerComponent: 8, bytesPerRow: 0,
+              let context = CGContext(data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
                                       space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else {
             throw ConversionError.failedToEncodeImage(.ico)
         }
         context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
-        guard let resized = context.makeImage() else {
+        let scale = min(Double(size) / Double(image.width), Double(size) / Double(image.height))
+        let w = Double(image.width) * scale
+        let h = Double(image.height) * scale
+        context.draw(image, in: CGRect(x: (Double(size) - w) / 2, y: (Double(size) - h) / 2, width: w, height: h))
+        guard let squared = context.makeImage() else {
             throw ConversionError.failedToEncodeImage(.ico)
         }
-        return resized
+        return squared
     }
 
     private func writeWebP(_ image: CGImage, quality: Float, to url: URL) throws {
