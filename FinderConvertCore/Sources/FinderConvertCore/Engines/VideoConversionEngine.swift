@@ -46,22 +46,14 @@ public actor VideoConversionEngine: ConversionEngine {
             throw ConversionError.unsupportedOutput(job.requestedOutput)
         }
 
-        let destinationURL = try self.naming.destinationURL(
-            for: sourceURL,
-            outputFormat: job.requestedOutput,
-            policy: job.destinationPolicy
-        )
-
-        if FileManager.default.fileExists(atPath: destinationURL.path) {
-            do {
-                try FileManager.default.removeItem(at: destinationURL)
-            } catch {
-                logger.error("Failed to remove existing file at destination: \(error.localizedDescription, privacy: .public)")
-                throw ConversionError.invalidDestination
-            }
-        }
-
         let asset = AVURLAsset(url: sourceURL)
+
+        // Write to a hidden temp file and move it into place when finished,
+        // so a partially written output never appears beside the source
+        let tempURL = FileManager.default.temporaryDirectory
+            .appending(path: UUID().uuidString, directoryHint: .notDirectory)
+            .appendingPathExtension(job.requestedOutput.preferredExtension)
+        defer { try? FileManager.default.removeItem(at: tempURL) }
 
         // Extract audio track from video
         if job.requestedOutput == .mp3 || job.requestedOutput == .m4a || job.requestedOutput == .wav || job.requestedOutput == .aiff || job.requestedOutput == .flac {
@@ -70,15 +62,15 @@ public actor VideoConversionEngine: ConversionEngine {
             if audioTracks.isEmpty {
                 throw ConversionError.filesystemError("This video has no audio track. Try a video recorded with a microphone.")
             }
-            try await extractAudio(from: asset, to: destinationURL, format: job.requestedOutput, progress: progress)
+            try await extractAudio(from: asset, to: tempURL, format: job.requestedOutput, progress: progress)
             _ = access
-            return ConversionResult(sourceURL: sourceURL, outputURL: destinationURL, outputFormat: job.requestedOutput)
+            return try publish(tempURL, sourceURL: sourceURL, job: job)
         }
 
         if job.requestedOutput == .gif {
-            try await exportAsAnimatedGIF(asset: asset, destination: destinationURL, progress: progress)
+            try await exportAsAnimatedGIF(asset: asset, destination: tempURL, progress: progress)
             _ = access
-            return ConversionResult(sourceURL: sourceURL, outputURL: destinationURL, outputFormat: job.requestedOutput)
+            return try publish(tempURL, sourceURL: sourceURL, job: job)
         }
 
         let presetName: String
@@ -112,7 +104,7 @@ public actor VideoConversionEngine: ConversionEngine {
             throw ConversionError.unsupportedOutput(job.requestedOutput)
         }
 
-        exportSession.outputURL = destinationURL
+        exportSession.outputURL = tempURL
 
         self.activeExports[job.id] = exportSession
         defer { self.activeExports.removeValue(forKey: job.id) }
@@ -128,9 +120,21 @@ public actor VideoConversionEngine: ConversionEngine {
             throw ConversionError.filesystemError("Export did not complete successfully. Status: \(exportSession.status.rawValue)")
         }
 
+        return try publish(tempURL, sourceURL: sourceURL, job: job)
+    }
+
+    // Resolve the final output name only after the conversion succeeded, then
+    // move the finished temp file into place in one step
+    private func publish(_ tempURL: URL, sourceURL: URL, job: ConversionJob) throws -> ConversionResult {
+        let destinationURL = try naming.destinationURL(
+            for: sourceURL,
+            outputFormat: job.requestedOutput,
+            policy: job.destinationPolicy
+        )
+        try FileManager.default.moveItem(at: tempURL, to: destinationURL)
         return ConversionResult(sourceURL: sourceURL, outputURL: destinationURL, outputFormat: job.requestedOutput)
     }
-    
+
     public func cancel(jobID: UUID) async {
         activeExports[jobID]?.cancelExport()
     }
