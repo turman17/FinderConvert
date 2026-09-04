@@ -1,24 +1,38 @@
 #!/bin/bash
 set -e
 
-# Signing identity: set SIGNING_IDENTITY env var to your Developer ID for distribution.
-# For development/testing, defaults to ad-hoc signing ("-").
+# Signing identity. A stable certificate identity keeps TCC permission
+# grants (Full Disk Access, Desktop/Documents/Downloads access) valid across
+# rebuilds; ad-hoc ("-") mints a new identity every build, which resets every
+# granted permission on each reinstall.
 #
-# Examples:
-#   Development (ad-hoc):  ./scripts/build-and-sign.sh
-#   Distribution:          SIGNING_IDENTITY="Developer ID Application: Your Name (TEAMID)" ./scripts/build-and-sign.sh
-SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
+# Auto-picks the first Apple Development certificate in the keychain.
+# Override with SIGNING_IDENTITY (e.g. a Developer ID for distribution),
+# or set SIGNING_IDENTITY="-" to force ad-hoc.
+if [ -z "${SIGNING_IDENTITY:-}" ]; then
+    SIGNING_IDENTITY="$(security find-identity -v -p codesigning 2>/dev/null \
+        | awk -F'"' '/Apple Development/ {print $2; exit}')"
+    SIGNING_IDENTITY="${SIGNING_IDENTITY:--}"
+fi
+echo "Signing identity: $SIGNING_IDENTITY"
 
 # Build the project using xcodebuild (without signing during Xcode build to avoid provisioning profile requirements)
 echo "Building FinderConvert..."
+CONFIGURATION="${CONFIGURATION:-Release}"
+
 xcodebuild -project FinderConvert.xcodeproj \
            -scheme FinderConvert \
            -derivedDataPath .local/DerivedData \
-           -configuration Debug \
+           -configuration "$CONFIGURATION" \
            build
 
-BUILT_APP=".local/DerivedData/Build/Products/Debug/FinderConvert.app"
+BUILT_APP=".local/DerivedData/Build/Products/${CONFIGURATION}/FinderConvert.app"
 BUILT_APPEX="${BUILT_APP}/Contents/PlugIns/FinderConvertActionExtension.appex"
+
+# Strip symbol tables so the public build doesn't expose internal structure
+echo "Stripping symbols..."
+strip -rSTx "${BUILT_APP}/Contents/MacOS/FinderConvert" 2>/dev/null || true
+strip -rSTx "${BUILT_APPEX}/Contents/MacOS/FinderConvertActionExtension" 2>/dev/null || true
 
 # Copy the AppIcon into Resources
 echo "Copying AppIcon..."

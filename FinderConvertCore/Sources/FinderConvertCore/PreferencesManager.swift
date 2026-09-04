@@ -1,14 +1,42 @@
 import Foundation
 
+public enum AppGroup {
+    // Team-ID-prefixed group: macOS authorizes it from the code signature
+    // alone. The old "group."-style name could not be tied to the signing
+    // team, so macOS 15+ showed an "access data from other apps" consent
+    // prompt on every launch.
+    public static let identifier = "YJ3UZ772GP.com.finderconvert.app.shared"
+    private static let legacyIdentifier = "group.com.finderconvert.app.shared"
+    private static let migrationFlag = "didMigrateFromLegacyGroupContainer"
+
+    public static func defaults() -> UserDefaults {
+        let suite = UserDefaults(suiteName: identifier) ?? .standard
+        // One-time settings/history migration out of the legacy container.
+        // Main app only: the sandboxed extension can no longer read the old
+        // container, and must not burn the shared migration flag
+        if Bundle.main.bundleIdentifier == "com.finderconvert.app",
+           !suite.bool(forKey: migrationFlag) {
+            if let legacy = UserDefaults(suiteName: legacyIdentifier),
+               let domain = legacy.persistentDomain(forName: legacyIdentifier) {
+                for (key, value) in domain where suite.object(forKey: key) == nil {
+                    suite.set(value, forKey: key)
+                }
+            }
+            suite.set(true, forKey: migrationFlag)
+        }
+        return suite
+    }
+}
+
 // @unchecked Sendable: UserDefaults is thread-safe but not marked Sendable in Swift 6
 public struct PreferencesManager: @unchecked Sendable {
     public static let shared = PreferencesManager()
-    
+
     private let defaults: UserDefaults
     private let defaultFormats: [OutputFormat] = [.jpeg, .png, .heic, .tiff, .gif, .bmp, .ico, .avif, .webp, .mp4, .mov, .hevc, .mp3, .m4a, .wav, .aiff, .flac, .pdf, .rtf, .html, .txt, .csv, .tsv, .xlsx, .docx]
     private let key = "enabledFormats"
 
-    public init(defaults: UserDefaults = UserDefaults(suiteName: "group.com.finderconvert.app.shared") ?? .standard) {
+    public init(defaults: UserDefaults = AppGroup.defaults()) {
         self.defaults = defaults
 
         if !defaults.bool(forKey: "v11_defaults_set") {
@@ -281,6 +309,11 @@ public struct PreferencesManager: @unchecked Sendable {
     }
 
     // Onboarding
+    public var showNotifications: Bool {
+        get { defaults.object(forKey: "showNotifications") as? Bool ?? true }
+        nonmutating set { defaults.set(newValue, forKey: "showNotifications") }
+    }
+
     public var hasCompletedOnboarding: Bool {
         get { defaults.bool(forKey: "hasCompletedOnboarding") }
         nonmutating set { defaults.set(newValue, forKey: "hasCompletedOnboarding") }

@@ -44,7 +44,7 @@ public struct ConversionHistoryStore: @unchecked Sendable {
     private let key = "conversionHistory"
     private let maxEntries = 100
 
-    public init(defaults: UserDefaults = UserDefaults(suiteName: "group.com.finderconvert.app.shared") ?? .standard) {
+    public init(defaults: UserDefaults = AppGroup.defaults()) {
         self.defaults = defaults
     }
 
