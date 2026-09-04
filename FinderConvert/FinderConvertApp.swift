@@ -4,10 +4,23 @@ import FinderConvertCore
 import OSLog
 import AppKit
 import Combine
+import ServiceManagement
 
 extension Notification.Name {
     static let navigateToTab = Notification.Name("FinderConvert.navigateToTab")
     static let showTipsPopover = Notification.Name("FinderConvert.showTipsPopover")
+}
+
+fileprivate func formatFileSize(_ bytes: Int64) -> String {
+    ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+}
+
+// Size of a regular file; nil for folders (recursive sizing would stall drops)
+fileprivate func fileSizeOnDisk(_ url: URL) -> Int64? {
+    guard let values = try? url.resourceValues(forKeys: [.fileSizeKey, .isRegularFileKey]),
+          values.isRegularFile == true,
+          let size = values.fileSize else { return nil }
+    return Int64(size)
 }
 
 // MARK: - Menu Bar Popover View
@@ -19,6 +32,7 @@ struct MenuBarDropView: View {
     @State private var selectedFormat: String = OutputFormat.jpeg.rawValue
     @State private var availableFormats: [OutputFormat] = OutputFormat.allCases.map { $0 }
     @State private var convertingStatus: String?
+    @State private var estimatedSizes: [URL: Int64] = [:]
 
     var body: some View {
         VStack(spacing: 0) {
@@ -50,19 +64,38 @@ struct MenuBarDropView: View {
                     )
 
                 if droppedFiles.isEmpty {
-                    VStack(spacing: 4) {
-                        Image(systemName: "arrow.down.doc")
-                            .font(.system(size: 16))
-                            .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
-                        Text("Drop files here")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
+                    Button {
+                        openFilePicker()
+                    } label: {
+                        VStack(spacing: 4) {
+                            Image(systemName: "arrow.down.doc")
+                                .font(.system(size: 16))
+                                .foregroundStyle(isTargeted ? Color.accentColor : .secondary)
+                            Text("Drop files or click to browse")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                        .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                 } else {
                     VStack(spacing: 2) {
                         HStack {
                             Text("\(droppedFiles.count) file\(droppedFiles.count == 1 ? "" : "s")")
                                 .font(.caption2.weight(.semibold))
+                            let totalSize = droppedFiles.compactMap(fileSizeOnDisk).reduce(0, +)
+                            if totalSize > 0 {
+                                Text(formatFileSize(totalSize))
+                                    .font(.caption2)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            let totalEstimate = droppedFiles.compactMap { estimatedSizes[$0] }.reduce(0, +)
+                            if totalEstimate > 0 {
+                                Text("→ ~\(formatFileSize(totalEstimate))")
+                                    .font(.caption2)
+                                    .foregroundStyle(Color.accentColor)
+                            }
                             Spacer()
                             Button { withAnimation { droppedFiles.removeAll(); refreshFormats() } } label: {
                                 Image(systemName: "xmark.circle.fill").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -81,6 +114,16 @@ struct MenuBarDropView: View {
                                             .lineLimit(1)
                                             .truncationMode(.middle)
                                         Spacer()
+                                        if let size = fileSizeOnDisk(url) {
+                                            Text(formatFileSize(size))
+                                                .font(.caption2)
+                                                .foregroundStyle(.quaternary)
+                                        }
+                                        if let est = estimatedSizes[url] {
+                                            Text("→ ~\(formatFileSize(est))")
+                                                .font(.caption2)
+                                                .foregroundStyle(Color.accentColor)
+                                        }
                                         Text(url.pathExtension.uppercased())
                                             .font(.caption2)
                                             .foregroundStyle(.tertiary)
@@ -99,6 +142,13 @@ struct MenuBarDropView: View {
             .onDrop(of: [.fileURL], isTargeted: $isTargeted) { providers in
                 handleDrop(providers: providers)
             }
+            .onAppear {
+                if !appDelegate.pendingPopoverFiles.isEmpty {
+                    droppedFiles = appDelegate.pendingPopoverFiles
+                    appDelegate.pendingPopoverFiles = []
+                    refreshFormats()
+                }
+            }
 
             // Format + Convert
             if !droppedFiles.isEmpty {
@@ -110,7 +160,9 @@ struct MenuBarDropView: View {
                     }
                     .pickerStyle(.menu)
                     .labelsHidden()
-                    .frame(maxWidth: .infinity)
+                    .fixedSize()
+
+                    Spacer()
 
                     Button {
                         convertFiles()
@@ -192,10 +244,8 @@ struct MenuBarDropView: View {
             if let update = appDelegate.availableUpdate {
                 Divider()
                 Button {
-                    if let url = UpdateChecker.shared.downloadURL(from: update) {
-                        NSWorkspace.shared.open(url)
-                    }
                     appDelegate.menuBarPopover?.performClose(nil)
+                    appDelegate.installUpdate(update)
                 } label: {
                     HStack(spacing: 6) {
                         Image(systemName: "arrow.down.circle.fill")
@@ -233,6 +283,9 @@ struct MenuBarDropView: View {
                 withAnimation { droppedFiles.append(contentsOf: urls) }
                 refreshFormats()
             }
+        }
+        .onChange(of: selectedFormat) { _, _ in
+            refreshEstimates()
         }
     }
 
@@ -276,9 +329,27 @@ struct MenuBarDropView: View {
         return true
     }
 
+    private func openFilePicker() {
+        // The transient popover closes while the panel is up; picked files
+        // are handed back through the delegate and restored on reopen
+        appDelegate.menuBarPopover?.performClose(nil)
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = true
+        panel.prompt = "Add Files"
+        panel.message = "Select files or folders to convert"
+        NSApp.activate(ignoringOtherApps: true)
+        if panel.runModal() == .OK, !panel.urls.isEmpty {
+            appDelegate.pendingPopoverFiles = panel.urls
+            appDelegate.toggleMenuBarPopover()
+        }
+    }
+
     private func refreshFormats() {
         if droppedFiles.isEmpty {
             availableFormats = OutputFormat.allCases.map { $0 }
+            estimatedSizes = [:]
             return
         }
         let service = QuickActionConversionService()
@@ -286,6 +357,33 @@ struct MenuBarDropView: View {
             availableFormats = outputs
             if !outputs.contains(where: { $0.rawValue == selectedFormat }) {
                 selectedFormat = outputs.first?.rawValue ?? OutputFormat.jpeg.rawValue
+            }
+        }
+        refreshEstimates()
+    }
+
+    private func refreshEstimates() {
+        let urls = droppedFiles
+        guard !urls.isEmpty, let format = OutputFormat(rawValue: selectedFormat) else {
+            estimatedSizes = [:]
+            return
+        }
+        Task {
+            let estimator = OutputSizeEstimator()
+            let detector = FileTypeDetector()
+            var result: [URL: Int64] = [:]
+            for url in urls {
+                guard let detected = try? detector.detect(url: url),
+                      detected.detectedType != .unsupported else { continue }
+                if let estimate = await estimator.estimate(url: url, input: detected.detectedType, output: format) {
+                    result[url] = estimate
+                }
+            }
+            let snapshot = result
+            await MainActor.run {
+                if droppedFiles == urls {
+                    estimatedSizes = snapshot
+                }
             }
         }
     }
@@ -375,6 +473,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     static func main() {
         let app = NSApplication.shared
         let delegate = AppDelegate()
+        AppDelegate.instance = delegate
         app.delegate = delegate
         app.run()
     }
@@ -392,6 +491,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
     @Published var lastResults: [ConversionResult] = []
     @Published var availableUpdate: GitHubRelease?
+    static weak var instance: AppDelegate?
+    var updateCheckTimer: Timer?
+    // Once a day; the check also runs at every launch
+    static let updateCheckInterval: TimeInterval = 86_400
+
+    func checkForUpdatesInBackground() {
+        Task {
+            if let release = await UpdateChecker.shared.checkForUpdate() {
+                await MainActor.run { self.availableUpdate = release }
+            }
+        }
+    }
 
     var sharedDefaults: UserDefaults?
 
@@ -425,12 +536,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         )
         
         checkPendingActions()
-        registerAsLoginItem()
 
-        // Check for updates
-        Task {
-            if let release = await UpdateChecker.shared.checkForUpdate() {
-                await MainActor.run { self.availableUpdate = release }
+        // Check for updates now and periodically (the app lives in the menu
+        // bar for weeks, so a launch-only check would go stale)
+        checkForUpdatesInBackground()
+        updateCheckTimer = Timer.scheduledTimer(withTimeInterval: Self.updateCheckInterval, repeats: true) { _ in
+            Task { @MainActor in
+                AppDelegate.instance?.checkForUpdatesInBackground()
             }
         }
 
@@ -509,6 +621,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
 
     var menuBarPanel: NSPanel?
     var menuBarPopover: NSPopover? // keep for compatibility
+    // Files picked via the popover's open panel, restored when it reopens
+    var pendingPopoverFiles: [URL] = []
 
     private func setupMenuBarIcon() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
@@ -563,6 +677,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         // App menu (FinderConvert)
         let appMenu = NSMenu()
         appMenu.addItem(withTitle: "About FinderConvert", action: #selector(showAbout), keyEquivalent: "")
+        appMenu.addItem(NSMenuItem.separator())
+        appMenu.addItem(withTitle: "Check for Updates...", action: #selector(checkForUpdates), keyEquivalent: "")
         appMenu.addItem(NSMenuItem.separator())
         appMenu.addItem(withTitle: "Settings...", action: #selector(showSettings), keyEquivalent: ",")
         appMenu.addItem(NSMenuItem.separator())
@@ -645,6 +761,69 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         NotificationCenter.default.post(name: .showTipsPopover, object: nil)
     }
 
+    @objc func checkForUpdates() {
+        Task { @MainActor in
+            let currentVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+            if let release = await UpdateChecker.shared.checkForUpdate() {
+                self.availableUpdate = release
+
+                let alert = NSAlert()
+                alert.messageText = "Update Available"
+                alert.informativeText = "FinderConvert \(release.tagName.replacingOccurrences(of: "v", with: "")) is available (you have \(currentVersion)). The update installs and relaunches automatically."
+                alert.addButton(withTitle: "Install & Relaunch")
+                alert.addButton(withTitle: "Later")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    installUpdate(release)
+                }
+            } else {
+                let alert = NSAlert()
+                alert.messageText = "You're Up to Date"
+                alert.informativeText = "FinderConvert \(currentVersion) is the latest version."
+                alert.addButton(withTitle: "OK")
+                alert.runModal()
+            }
+        }
+    }
+
+    // In-place update: download the release zip, swap the bundle in
+    // /Applications, and relaunch. Falls back to a browser download when
+    // running from anywhere else (e.g. the dev preview) or on failure.
+    func installUpdate(_ release: GitHubRelease) {
+        let bundleURL = Bundle.main.bundleURL
+        guard bundleURL.path == "/Applications/FinderConvert.app" else {
+            Task {
+                if let url = await UpdateChecker.shared.downloadURL(from: release) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+            return
+        }
+
+        Task { @MainActor in
+            do {
+                self.activeConversion = ActiveConversion(description: "Downloading update \(release.tagName)...")
+                let newApp = try await UpdateInstaller.shared.installUpdate(from: release, into: bundleURL)
+                self.activeConversion = nil
+
+                let config = NSWorkspace.OpenConfiguration()
+                config.createsNewApplicationInstance = true
+                try? await NSWorkspace.shared.openApplication(at: newApp, configuration: config)
+                NSApp.terminate(nil)
+            } catch {
+                self.activeConversion = nil
+                let alert = NSAlert()
+                alert.messageText = "Update Failed"
+                alert.informativeText = "\(error.localizedDescription)\nYou can download the update manually instead."
+                alert.addButton(withTitle: "Download in Browser")
+                alert.addButton(withTitle: "Cancel")
+                if alert.runModal() == .alertFirstButtonReturn,
+                   let url = await UpdateChecker.shared.downloadURL(from: release) {
+                    NSWorkspace.shared.open(url)
+                }
+            }
+        }
+    }
+
     @objc func toggleTipsButton() {
         let current = UserDefaults.standard.object(forKey: "showTipsCircle") as? Bool ?? true
         UserDefaults.standard.set(!current, forKey: "showTipsCircle")
@@ -723,17 +902,6 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         onboardingWindowController = controller
         controller.showWindow(nil)
         NSApplication.shared.activate(ignoringOtherApps: true)
-    }
-
-    private func registerAsLoginItem() {
-        let script = "tell application \"System Events\"\nif not (exists login item \"FinderConvert\") then\nmake login item at end with properties {path:\"/Applications/FinderConvert.app\", hidden:true}\nend if\nend tell"
-        if let appleScript = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            appleScript.executeAndReturnError(&error)
-            if let error = error {
-                logger.warning("Login item registration: \(error)")
-            }
-        }
     }
 
     func windowWillClose(_ notification: Notification) {
@@ -931,6 +1099,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func postCompletionNotification(title: String, body: String) async {
+        guard PreferencesManager.shared.showNotifications else { return }
         let content = UNMutableNotificationContent()
         content.title = title
         content.body = body
@@ -938,6 +1107,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func postNotification(for result: BatchConversionResult) async throws {
+        guard PreferencesManager.shared.showNotifications else { return }
         let content = UNMutableNotificationContent()
         if result.failures.isEmpty {
             let title = result.successes.count == 1 ? "Converted 1 file." : "Converted \(result.successes.count) files."
@@ -954,6 +1124,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
 
     private func postStartedNotification(fileDesc: String, format: String) async {
+        guard PreferencesManager.shared.showNotifications else { return }
         let content = UNMutableNotificationContent()
         content.title = "Converting \(fileDesc)..."
         content.body = "Converting to \(format). This may take a moment."
@@ -1008,8 +1179,22 @@ struct MainView: View {
 
     var body: some View {
         NavigationSplitView {
-            SidebarView(selection: $selectedItem)
+            SidebarView(selection: $selectedItem, appDelegate: appDelegate)
         } detail: {
+            detailContent
+        }
+        .navigationSplitViewStyle(.balanced)
+        .onReceive(NotificationCenter.default.publisher(for: .navigateToTab)) { notification in
+            if let tab = notification.object as? SidebarItem {
+                selectedItem = tab
+            }
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .showTipsPopover)) { _ in
+            showTips = true
+        }
+    }
+
+    private var detailContent: some View {
             Group {
                 switch selectedItem {
                 case .converter:
@@ -1059,16 +1244,6 @@ struct MainView: View {
                 }
                 .padding(16)
             }
-        }
-        .navigationSplitViewStyle(.balanced)
-        .onReceive(NotificationCenter.default.publisher(for: .navigateToTab)) { notification in
-            if let tab = notification.object as? SidebarItem {
-                selectedItem = tab
-            }
-        }
-        .onReceive(NotificationCenter.default.publisher(for: .showTipsPopover)) { _ in
-            showTips = true
-        }
     }
 }
 
@@ -1076,6 +1251,7 @@ struct MainView: View {
 
 struct SidebarView: View {
     @Binding var selection: SidebarItem
+    @ObservedObject var appDelegate: AppDelegate
 
     var body: some View {
         List(selection: $selection) {
@@ -1087,6 +1263,26 @@ struct SidebarView: View {
         }
         .listStyle(.sidebar)
         .navigationSplitViewColumnWidth(min: 160, ideal: 180, max: 220)
+        .safeAreaInset(edge: .bottom) {
+            if let update = appDelegate.availableUpdate {
+                Button {
+                    appDelegate.installUpdate(update)
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "arrow.down.circle.fill")
+                        Text("Update to \(update.tagName.replacingOccurrences(of: "v", with: ""))")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 4)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.green)
+                .help("Download and install the update, then relaunch")
+                .padding(.horizontal, 12)
+                .padding(.bottom, 12)
+            }
+        }
     }
 }
 
@@ -1097,6 +1293,7 @@ struct DroppedFileRow: View {
     let availableFormats: [OutputFormat]
     let showFormatPicker: Bool
     let presetNames: [String]
+    let estimatedSize: Int64?
     let onRename: (String) -> Void
     let onFormatChange: (String?) -> Void
     let onPresetChange: (String?) -> Void
@@ -1106,13 +1303,14 @@ struct DroppedFileRow: View {
     @State private var filePreset: String?
 
     init(file: DroppedFile, availableFormats: [OutputFormat] = [], showFormatPicker: Bool = false,
-         presetNames: [String] = [],
+         presetNames: [String] = [], estimatedSize: Int64? = nil,
          onRename: @escaping (String) -> Void, onFormatChange: @escaping (String?) -> Void = { _ in },
          onPresetChange: @escaping (String?) -> Void = { _ in }, onRemove: @escaping () -> Void) {
         self.file = file
         self.availableFormats = availableFormats
         self.showFormatPicker = showFormatPicker
         self.presetNames = presetNames
+        self.estimatedSize = estimatedSize
         self.onRename = onRename
         self.onFormatChange = onFormatChange
         self.onPresetChange = onPresetChange
@@ -1136,6 +1334,18 @@ struct DroppedFileRow: View {
             Text(".\(file.url.pathExtension)")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
+            if let size = file.fileSize {
+                Text(formatFileSize(size))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .padding(.leading, 2)
+            }
+            if let est = estimatedSize {
+                Text("→ ~\(formatFileSize(est))")
+                    .font(.caption2)
+                    .foregroundStyle(Color.accentColor)
+                    .help("Estimated output size with current format and settings")
+            }
             if showFormatPicker && !availableFormats.isEmpty {
                 Text("→")
                     .font(.caption2)
@@ -1207,12 +1417,14 @@ struct DroppedFileRow: View {
 struct DroppedFile: Identifiable, Equatable {
     let id = UUID()
     let url: URL
+    let fileSize: Int64?
     var outputName: String
     var formatOverride: String? // per-file format (nil = use global)
     var presetOverride: String? // per-file preset (nil = current settings)
 
     init(url: URL) {
         self.url = url
+        self.fileSize = fileSizeOnDisk(url)
         self.outputName = url.deletingPathExtension().lastPathComponent
         self.formatOverride = nil
         self.presetOverride = nil
@@ -1231,6 +1443,7 @@ struct ConverterTab: View {
     @State private var presetName = ""
     @State private var activePresetName = ""
     @State private var convertedResults: [ConversionResult] = []
+    @State private var estimatedSizes: [UUID: Int64] = [:]
 
     // Which file categories a preset's settings are meaningful for
     private func presetCategories(_ s: PresetSettings) -> Set<FileCategory> {
@@ -1389,6 +1602,19 @@ struct ConverterTab: View {
                         HStack {
                             Text("\(droppedFiles.count) file\(droppedFiles.count == 1 ? "" : "s")")
                                 .font(.subheadline.weight(.semibold))
+                            let totalSize = droppedFiles.compactMap(\.fileSize).reduce(0, +)
+                            if totalSize > 0 {
+                                Text(formatFileSize(totalSize))
+                                    .font(.caption)
+                                    .foregroundStyle(.tertiary)
+                            }
+                            let totalEstimate = droppedFiles.compactMap { estimatedSizes[$0.id] }.reduce(0, +)
+                            if totalEstimate > 0 {
+                                Text("→ ~\(formatFileSize(totalEstimate))")
+                                    .font(.caption)
+                                    .foregroundStyle(Color.accentColor)
+                                    .help("Estimated total output size with current format and settings")
+                            }
                             Spacer()
                             Button {
                                 withAnimation { droppedFiles.removeAll() }
@@ -1411,6 +1637,7 @@ struct ConverterTab: View {
                                         availableFormats: availableFormats,
                                         showFormatPicker: droppedFiles.count > 1,
                                         presetNames: presetNames(for: fileCategory(file.url)),
+                                        estimatedSize: estimatedSizes[file.id],
                                         onRename: { newName in
                                             if let idx = droppedFiles.firstIndex(where: { $0.id == file.id }) {
                                                 droppedFiles[idx].outputName = newName
@@ -1420,11 +1647,13 @@ struct ConverterTab: View {
                                             if let idx = droppedFiles.firstIndex(where: { $0.id == file.id }) {
                                                 droppedFiles[idx].formatOverride = fmt
                                             }
+                                            refreshEstimates()
                                         },
                                         onPresetChange: { preset in
                                             if let idx = droppedFiles.firstIndex(where: { $0.id == file.id }) {
                                                 droppedFiles[idx].presetOverride = preset
                                             }
+                                            refreshEstimates()
                                         },
                                         onRemove: {
                                             withAnimation { droppedFiles.removeAll { $0.id == file.id } }
@@ -1554,6 +1783,9 @@ struct ConverterTab: View {
                 withAnimation { convertedResults = results }
             }
         }
+        .onChange(of: selectedFormatId) { _, _ in
+            refreshEstimates()
+        }
     }
 
     private func iconForFile(_ url: URL) -> String {
@@ -1592,6 +1824,7 @@ struct ConverterTab: View {
                     activePresetName = name
                 }
             }
+            refreshEstimates()
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: activePresetName == name ? "checkmark.circle.fill" : icon)
@@ -1702,6 +1935,7 @@ struct ConverterTab: View {
         let urls = droppedFiles.map { $0.url }
         if urls.isEmpty {
             availableFormats = OutputFormat.allCases.map { $0 }
+            estimatedSizes = [:]
             return
         }
         let service = QuickActionConversionService()
@@ -1709,6 +1943,41 @@ struct ConverterTab: View {
             availableFormats = outputs
             if !outputs.contains(where: { $0.rawValue == selectedFormatId }) {
                 selectedFormatId = outputs.first?.rawValue ?? OutputFormat.jpeg.rawValue
+            }
+        }
+        refreshEstimates()
+    }
+
+    // Recompute per-file output size predictions for the current target
+    // format, per-file overrides, and whatever preset is applied
+    private func refreshEstimates() {
+        let files = droppedFiles
+        let globalFormat = selectedFormatId
+        guard !files.isEmpty else {
+            estimatedSizes = [:]
+            return
+        }
+        Task {
+            let estimator = OutputSizeEstimator()
+            let detector = FileTypeDetector()
+            var result: [UUID: Int64] = [:]
+            for file in files {
+                guard let detected = try? detector.detect(url: file.url),
+                      detected.detectedType != .unsupported,
+                      let format = OutputFormat(rawValue: file.formatOverride ?? globalFormat) else { continue }
+                let preset = file.presetOverride.flatMap { PreferencesManager.shared.presetSettings(named: $0) }
+                if let estimate = await estimator.estimate(
+                    url: file.url, input: detected.detectedType, output: format, preset: preset
+                ) {
+                    result[file.id] = estimate
+                }
+            }
+            let snapshot = result
+            await MainActor.run {
+                // Drop stale results if the file list changed meanwhile
+                if Set(droppedFiles.map(\.id)) == Set(files.map(\.id)) {
+                    estimatedSizes = snapshot
+                }
             }
         }
     }
@@ -2234,6 +2503,28 @@ struct HistoryTab: View {
     }
 }
 
+fileprivate var appVersionString: String {
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?"
+}
+
+// Reading a TCC-protected location only succeeds with Full Disk Access
+fileprivate func checkFullDiskAccessNow() -> Bool {
+    (try? FileManager.default.contentsOfDirectory(atPath: NSHomeDirectory() + "/Library/Safari")) != nil
+}
+
+// pluginkit prefixes enabled plugins with "+"
+fileprivate func checkFinderExtensionEnabled() -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/pluginkit")
+    process.arguments = ["-m", "-i", "com.finderconvert.app.ActionExtension"]
+    let pipe = Pipe()
+    process.standardOutput = pipe
+    do { try process.run() } catch { return false }
+    process.waitUntilExit()
+    let output = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    return output.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("+")
+}
+
 // MARK: - Settings components (shared by SettingsTab and PresetsTab)
 
 private func settingsSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
@@ -2470,8 +2761,10 @@ struct SettingsTab: View {
     @State private var renameSuffix: String = PreferencesManager.shared.renameSuffix
     @State private var useCustomOutput = PreferencesManager.shared.useCustomOutputFolder
     @State private var customOutputPath: String = PreferencesManager.shared.customOutputFolder?.path ?? ""
-    @State private var showNotifications = true
+    @State private var showNotifications = PreferencesManager.shared.showNotifications
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @AppStorage("showTipsCircle") private var showTipsCircle = true
+    @State private var hasFullDiskAccess = false
 
     var body: some View {
         ScrollView {
@@ -2538,13 +2831,42 @@ struct SettingsTab: View {
                     }
                 }
 
+                // --- General ---
+                settingsSection(title: "GENERAL", icon: "power") {
+                    settingsRow {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Launch at login")
+                                .font(.body)
+                            Text("Start FinderConvert automatically so the Finder menu and menu bar icon are always available.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Toggle("", isOn: $launchAtLogin)
+                            .toggleStyle(.switch)
+                            .controlSize(.small)
+                            .labelsHidden()
+                            .onChange(of: launchAtLogin) { _, enabled in
+                                do {
+                                    if enabled {
+                                        try SMAppService.mainApp.register()
+                                    } else {
+                                        try SMAppService.mainApp.unregister()
+                                    }
+                                } catch {
+                                    launchAtLogin = SMAppService.mainApp.status == .enabled
+                                }
+                            }
+                    }
+                }
+
                 // --- Notifications ---
                 settingsSection(title: "NOTIFICATIONS", icon: "bell") {
                     settingsRow {
                         VStack(alignment: .leading, spacing: 6) {
                             Text("Show notifications")
                                 .font(.body)
-                            Text("Display start/finish notifications for large file conversions (>1 MB).")
+                            Text("Display start/finish notifications for large file conversions (>1 MB). Failures are always shown.")
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         }
@@ -2553,6 +2875,38 @@ struct SettingsTab: View {
                             .toggleStyle(.switch)
                             .controlSize(.small)
                             .labelsHidden()
+                            .onChange(of: showNotifications) { _, val in
+                                PreferencesManager.shared.showNotifications = val
+                            }
+                    }
+                }
+
+                // --- Disk Access ---
+                settingsSection(title: "DISK ACCESS", icon: "externaldrive.badge.checkmark") {
+                    settingsRow {
+                        VStack(alignment: .leading, spacing: 6) {
+                            HStack(spacing: 6) {
+                                Circle()
+                                    .fill(hasFullDiskAccess ? Color.green : Color.orange)
+                                    .frame(width: 8, height: 8)
+                                Text(hasFullDiskAccess ? "Full Disk Access granted" : "Full Disk Access not granted")
+                                    .font(.body)
+                            }
+                            Text(hasFullDiskAccess
+                                 ? "FinderConvert can convert files anywhere without asking for permission."
+                                 : "Grant once in System Settings → Privacy & Security → Full Disk Access, and FinderConvert will never ask for folder permissions again.")
+                                .font(.caption)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        if !hasFullDiskAccess {
+                            Button("Open System Settings") {
+                                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
+                            }
+                            .font(.caption)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                        }
                     }
                 }
 
@@ -2617,7 +2971,7 @@ struct SettingsTab: View {
                         Text("Version")
                             .font(.body)
                         Spacer()
-                        Text("1.0.0")
+                        Text(appVersionString)
                             .font(.system(.body, design: .monospaced))
                             .foregroundStyle(.secondary)
                     }
@@ -2642,6 +2996,10 @@ struct SettingsTab: View {
                 }
             }
             .padding(.bottom, 32)
+        }
+        .onAppear { hasFullDiskAccess = checkFullDiskAccessNow() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            hasFullDiskAccess = checkFullDiskAccessNow()
         }
     }
 
@@ -2682,6 +3040,23 @@ struct SettingsTab: View {
 struct OnboardingView: View {
     let onComplete: () -> Void
     @State private var currentPage = 0
+    @State private var notificationsGranted = false
+    @State private var fullDiskGranted = false
+    @State private var extensionEnabled = false
+    private let permissionTimer = Timer.publish(every: 1.5, on: .main, in: .common).autoconnect()
+
+    private func refreshPermissions() {
+        withAnimation(.spring(duration: 0.4)) {
+            fullDiskGranted = checkFullDiskAccessNow()
+            extensionEnabled = checkFinderExtensionEnabled()
+        }
+        Task { @MainActor in
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            withAnimation(.spring(duration: 0.4)) {
+                notificationsGranted = settings.authorizationStatus == .authorized
+            }
+        }
+    }
 
     var body: some View {
         VStack(spacing: 0) {
@@ -2737,6 +3112,11 @@ struct OnboardingView: View {
             .padding(.horizontal, 32)
             .padding(.bottom, 24)
         }
+        .onAppear { refreshPermissions() }
+        .onReceive(permissionTimer) { _ in refreshPermissions() }
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissions()
+        }
     }
 
     // MARK: - Pages
@@ -2786,10 +3166,21 @@ struct OnboardingView: View {
                     color: .orange,
                     title: "Notifications",
                     description: "Get notified when conversions start and finish.",
+                    granted: notificationsGranted,
                     action: {
-                        Task {
+                        Task { @MainActor in
                             let center = UNUserNotificationCenter.current()
-                            try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+                            let settings = await center.notificationSettings()
+                            if settings.authorizationStatus == .notDetermined {
+                                _ = try? await center.requestAuthorization(options: [.alert, .sound, .badge])
+                            } else {
+                                // Already decided — the system prompt won't show
+                                // again, so take the user to Settings instead
+                                let deepLink = URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings.extension?id=com.finderconvert.app")
+                                let fallback = URL(string: "x-apple.systempreferences:com.apple.preference.notifications")!
+                                NSWorkspace.shared.open(deepLink ?? fallback)
+                            }
+                            refreshPermissions()
                         }
                     },
                     buttonText: "Enable"
@@ -2800,6 +3191,7 @@ struct OnboardingView: View {
                     color: .blue,
                     title: "Full Disk Access",
                     description: "Allows converting files anywhere on your Mac.",
+                    granted: fullDiskGranted,
                     action: {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles")!)
                     },
@@ -2811,6 +3203,7 @@ struct OnboardingView: View {
                     color: .green,
                     title: "Finder Extension",
                     description: "Adds right-click conversion to Finder.",
+                    granted: extensionEnabled,
                     action: {
                         NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences")!)
                     },
@@ -2852,16 +3245,29 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 16)
 
-            Button {
-                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences")!)
-            } label: {
-                Label("Open Finder Extension Settings", systemImage: "gear")
-                    .font(.body.weight(.medium))
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 10)
+            if extensionEnabled {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .symbolEffect(.bounce, value: extensionEnabled)
+                    Text("Extension is enabled — you're all set!")
+                        .font(.body.weight(.medium))
+                        .foregroundStyle(.green)
+                }
+                .padding(.vertical, 10)
+                .transition(.scale(scale: 0.5).combined(with: .opacity))
+            } else {
+                Button {
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.ExtensionsPreferences")!)
+                } label: {
+                    Label("Open Finder Extension Settings", systemImage: "gear")
+                        .font(.body.weight(.medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 10)
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.large)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.large)
 
             Spacer()
         }
@@ -2941,7 +3347,7 @@ struct OnboardingView: View {
 
     // MARK: - Components
 
-    private func permissionRow(icon: String, color: Color, title: String, description: String, action: (() -> Void)?, buttonText: String?) -> some View {
+    private func permissionRow(icon: String, color: Color, title: String, description: String, granted: Bool, action: (() -> Void)?, buttonText: String?) -> some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
                 .font(.system(size: 18))
@@ -2952,15 +3358,22 @@ struct OnboardingView: View {
                 Text(description).font(.caption).foregroundStyle(.secondary)
             }
             Spacer()
-            if let action, let text = buttonText {
+            if granted {
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.body)
+                        .symbolEffect(.bounce, value: granted)
+                    Text("Granted")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                .transition(.scale(scale: 0.5).combined(with: .opacity))
+            } else if let action, let text = buttonText {
                 Button(text) { action() }
                     .font(.caption)
                     .buttonStyle(.bordered)
                     .controlSize(.small)
-            } else {
-                Image(systemName: "checkmark.circle")
-                    .foregroundStyle(.green)
-                    .font(.subheadline)
             }
         }
     }
@@ -3438,7 +3851,7 @@ struct AboutTab: View {
                 Text("FinderConvert")
                     .font(.title.weight(.bold))
 
-                Text("1.0.0")
+                Text(appVersionString)
                     .font(.subheadline.weight(.medium))
                     .foregroundStyle(.tertiary)
                     .padding(.top, -14)
