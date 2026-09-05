@@ -1,15 +1,19 @@
 # FinderConvert
 
+**Convert files directly from Finder's right-click menu.**
+
+A free, open-source, native macOS file converter for images, video, audio, PDFs, documents, and spreadsheets.
+
+**Right-click → Convert File → choose a format → done.**
+
+Native Swift · Offline · No uploads · No Electron · No ffmpeg
+
 [![Release](https://img.shields.io/github/v/release/turman17/FinderConvert)](https://github.com/turman17/FinderConvert/releases/latest)
 [![Downloads](https://img.shields.io/github/downloads/turman17/FinderConvert/total)](https://github.com/turman17/FinderConvert/releases)
 [![License: GPL-3.0](https://img.shields.io/badge/license-GPL--3.0-blue)](LICENSE)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-black)](https://github.com/turman17/FinderConvert/releases/latest)
 
-A native macOS utility that adds file conversion directly to Finder's right-click menu. Convert images, videos, audio, documents, and spreadsheets without opening separate apps.
-
-**[Website](https://turman17.github.io/FinderConvert-website/)** · **[Download](https://github.com/turman17/FinderConvert/releases/latest)** 
-
-Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus two small static libraries (LAME for MP3, libwebp for WebP) — no ffmpeg, no Electron, a few MB total.
+**[Website](https://turman17.github.io/FinderConvert-website/)** · **[Download](https://github.com/turman17/FinderConvert/releases/latest)**
 
 ![Convert File in Finder's right-click menu](docs/screenshots/finder-menu.jpg)
 
@@ -17,25 +21,20 @@ Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus
 |---|---|
 | ![Main app window with drop zone and presets](docs/screenshots/app.jpg) | ![Menu bar popover](docs/screenshots/menubar.jpg) |
 
+## Popular conversions
+
+HEIC → JPG · WebP → PNG · MOV → MP4 · video → MP3 · PDF → JPG/PNG · SVG → PNG · EPUB → PDF · Markdown → PDF · XLSX → CSV — and 50+ more paths below.
+
 ## Install
 
-### Homebrew
-
 ```bash
-brew install --cask turman17/tap/finderconvert
+brew install --cask --no-quarantine turman17/tap/finderconvert
 ```
 
-The app is not notarized (no paid Apple Developer account), so clear the quarantine flag once after installing (thanks Apple):
+Or download the latest `.dmg`/`.zip` from [Releases](https://github.com/turman17/FinderConvert/releases) and move the app to `/Applications`.
 
-```bash
-xattr -dr com.apple.quarantine /Applications/FinderConvert.app
-```
-
-Alternatively, install with quarantine disabled in one step: `brew install --cask --no-quarantine turman17/tap/finderconvert`.
-
-### Manual
-
-Download the latest `.dmg` or `.zip` from [Releases](https://github.com/turman17/FinderConvert/releases), move the app to `/Applications`, and run the same `xattr` command.
+> **Why `--no-quarantine`?** FinderConvert is open source but not notarized (no paid Apple Developer account). If you install without the flag — or download manually — clear the quarantine once with
+> `xattr -dr com.apple.quarantine /Applications/FinderConvert.app`, or approve the app under System Settings → Privacy & Security → "Open Anyway".
 
 ### After installing
 
@@ -47,6 +46,8 @@ Download the latest `.dmg` or `.zip` from [Releases](https://github.com/turman17
 The app checks GitHub for new releases and can update itself in place.
 
 ## Features
+
+Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus two small static libraries (LAME for MP3, libwebp for WebP) — no ffmpeg, no Electron, a few MB total.
 
 ### Supported Formats
 
@@ -152,6 +153,12 @@ Automated coverage is currently thin (`FinderConvertTests` covers output naming)
 ```bash
 xcodebuild -project FinderConvert.xcodeproj -scheme FinderConvert -destination 'platform=macOS' test
 ```
+
+## Contributing & support
+
+Found a bug or want a format added? [Open an issue](https://github.com/turman17/FinderConvert/issues) — and see [CONTRIBUTING.md](CONTRIBUTING.md) for how to build and submit changes. Test-suite contributions are especially welcome.
+
+If FinderConvert saves you time, **⭐ star the repo** — it's how other Mac users find it.
 
 ## License
 

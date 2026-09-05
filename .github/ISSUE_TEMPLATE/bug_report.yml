@@ -1,0 +1,43 @@
+name: Bug report
+description: A conversion failed, crashed, or produced a wrong result
+labels: [bug]
+body:
+  - type: input
+    id: macos
+    attributes:
+      label: macOS version
+      placeholder: e.g. macOS 15.3, M2 MacBook Air
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: FinderConvert version
+      description: Shown in the About tab
+      placeholder: e.g. 1.0.3
+    validations:
+      required: true
+  - type: input
+    id: conversion
+    attributes:
+      label: Conversion attempted
+      placeholder: e.g. HEIC → JPEG, MOV → MP3
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead? Screenshots welcome.
+    validations:
+      required: true
+  - type: dropdown
+    id: entry-point
+    attributes:
+      label: Where did you start the conversion?
+      options:
+        - Finder right-click menu
+        - App window (drag & drop)
+        - Menu bar icon
+    validations:
+      required: false
