@@ -244,18 +244,21 @@ public actor SpreadsheetConversionEngine: ConversionEngine {
             throw ConversionError.filesystemError("Failed to unzip XLSX file.")
         }
 
-        // Parse shared strings (may not exist if file uses inline strings)
+        // Parse shared strings (may not exist if file uses inline strings).
+        // All element lookups match by local name: writers like ClosedXML
+        // and EPPlus prefix every element (<x:si>), which name-based
+        // matching would miss entirely
         var sharedStrings: [String] = []
         let sharedStringsURL = tempDir.appendingPathComponent("xl/sharedStrings.xml")
         if let ssData = try? Data(contentsOf: sharedStringsURL),
            let ssDoc = try? XMLDocument(data: ssData, options: []) {
-            let nodes = try ssDoc.nodes(forXPath: "//si")
+            let nodes = try ssDoc.nodes(forXPath: "//*[local-name()='si']")
             for node in nodes {
                 if let element = node as? XMLElement {
-                    let texts = element.elements(forName: "t").compactMap { $0.stringValue }
+                    let texts = childElements(of: element, localName: "t").compactMap { $0.stringValue }
                     if texts.isEmpty {
-                        let runs = element.elements(forName: "r")
-                        let runTexts = runs.flatMap { $0.elements(forName: "t") }.compactMap { $0.stringValue }
+                        let runs = childElements(of: element, localName: "r")
+                        let runTexts = runs.flatMap { childElements(of: $0, localName: "t") }.compactMap { $0.stringValue }
                         sharedStrings.append(runTexts.joined())
                     } else {
                         sharedStrings.append(texts.joined())
@@ -302,7 +305,7 @@ public actor SpreadsheetConversionEngine: ConversionEngine {
         let relsURL = tempDir.appendingPathComponent("xl/_rels/workbook.xml.rels")
         if let relsData = try? Data(contentsOf: relsURL),
            let relsDoc = try? XMLDocument(data: relsData, options: []) {
-            let rels = try relsDoc.nodes(forXPath: "//Relationship")
+            let rels = try relsDoc.nodes(forXPath: "//*[local-name()='Relationship']")
             for rel in rels {
                 guard let element = rel as? XMLElement,
                       let type = element.attribute(forName: "Type")?.stringValue,
@@ -349,14 +352,20 @@ public actor SpreadsheetConversionEngine: ConversionEngine {
         return sheets
     }
 
+    // Children matched by local name, so namespace-prefixed spreadsheets
+    // (<x:row>, <x:c>) parse the same as unprefixed ones
+    private func childElements(of element: XMLElement, localName: String) -> [XMLElement] {
+        (element.children ?? []).compactMap { $0 as? XMLElement }.filter { $0.localName == localName }
+    }
+
     private func parseSheetXML(doc: XMLDocument, sharedStrings: [String]) throws -> [[String]] {
-        let rowNodes = try doc.nodes(forXPath: "//row")
+        let rowNodes = try doc.nodes(forXPath: "//*[local-name()='row']")
         var rows: [[String]] = []
         var maxCol = 0
 
         for rowNode in rowNodes {
             guard let rowElement = rowNode as? XMLElement else { continue }
-            let cellNodes = rowElement.elements(forName: "c")
+            let cellNodes = childElements(of: rowElement, localName: "c")
             var rowData: [(Int, String)] = [] // (column index, value)
 
             for cell in cellNodes {
@@ -369,11 +378,11 @@ public actor SpreadsheetConversionEngine: ConversionEngine {
                 let value: String
                 if type == "inlineStr" {
                     // Inline string: <is><t>value</t></is>
-                    value = cell.elements(forName: "is").first?
-                        .elements(forName: "t").first?.stringValue ?? ""
+                    value = childElements(of: cell, localName: "is").first
+                        .flatMap { childElements(of: $0, localName: "t").first }?.stringValue ?? ""
                 } else if type == "s" {
                     // Shared string reference
-                    let vStr = cell.elements(forName: "v").first?.stringValue ?? ""
+                    let vStr = childElements(of: cell, localName: "v").first?.stringValue ?? ""
                     if let idx = Int(vStr), idx < sharedStrings.count {
                         value = sharedStrings[idx]
                     } else {
@@ -381,7 +390,7 @@ public actor SpreadsheetConversionEngine: ConversionEngine {
                     }
                 } else {
                     // Number or other value
-                    value = cell.elements(forName: "v").first?.stringValue ?? ""
+                    value = childElements(of: cell, localName: "v").first?.stringValue ?? ""
                 }
 
                 rowData.append((colIndex, value))
