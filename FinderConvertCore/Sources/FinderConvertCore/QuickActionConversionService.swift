@@ -18,6 +18,31 @@ public struct QuickActionConversionService: Sendable {
         try urls.map { try detector.detect(url: $0) }
     }
 
+    // Bounded look at a selection for menu building: enumerate at most
+    // `limit` files so a huge folder can't stall the caller. Empty result
+    // can mean either nothing convertible or no permission to enumerate
+    public func sampledOutputs(for urls: [URL], limit: Int = 200) -> [OutputFormat] {
+        var files: [DetectedFile] = []
+        let fileManager = FileManager.default
+        outer: for url in urls {
+            var isDirectory: ObjCBool = false
+            guard fileManager.fileExists(atPath: url.path, isDirectory: &isDirectory) else { continue }
+            if isDirectory.boolValue {
+                let enumerator = fileManager.enumerator(at: url, includingPropertiesForKeys: [.isRegularFileKey], options: [.skipsHiddenFiles])
+                while let child = enumerator?.nextObject() as? URL {
+                    if let detected = try? detector.detect(url: child), detected.detectedType != .unsupported {
+                        files.append(detected)
+                        if files.count >= limit { break outer }
+                    }
+                }
+            } else if let detected = try? detector.detect(url: url), detected.detectedType != .unsupported {
+                files.append(detected)
+                if files.count >= limit { break }
+            }
+        }
+        return registry.availableOutputs(for: files)
+    }
+
     public func availableOutputs(for urls: [URL]) throws -> [OutputFormat] {
         let expanded = expandURLs(urls)
         let detected = expanded.compactMap { item -> DetectedFile? in

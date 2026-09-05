@@ -21,26 +21,48 @@ class FinderSyncController: FIFinderSync {
             return NSMenu(title: "")
         }
         
-        let availableOutputs: [OutputFormat]
-        do {
-            let service = QuickActionConversionService()
-            availableOutputs = try service.availableOutputs(for: selectedURLs)
-            logger.info("availableOutputs for \(selectedURLs.first?.path ?? ""): \(availableOutputs.map { $0.rawValue })")
-        } catch {
-            logger.error("availableOutputs threw error: \(error.localizedDescription)")
-            availableOutputs = []
+        let isDirectory: (URL) -> Bool = { url in
+            var isDir: ObjCBool = false
+            return FileManager.default.fileExists(atPath: url.path, isDirectory: &isDir) && isDir.boolValue
         }
-        
+        let containsFolder = selectedURLs.contains(where: isDirectory)
+
+        let availableOutputs: [OutputFormat]
+        if containsFolder {
+            // The sandbox blocks this process from enumerating folder
+            // contents, so ask the main app over the local query port; try a
+            // direct sample first for the locations the sandbox does allow
+            // (e.g. Downloads). If neither works - app not running - offer
+            // every format and let the conversion sort the files out
+            let local = QuickActionConversionService().sampledOutputs(for: selectedURLs)
+            if !local.isEmpty {
+                availableOutputs = local
+                logger.info("folder menu via local sample: \(local.map { $0.rawValue })")
+            } else if let remote = MenuQuery.sampledOutputs(for: selectedURLs), !remote.isEmpty {
+                availableOutputs = remote
+                logger.info("folder menu via app query: \(remote.map { $0.rawValue })")
+            } else {
+                availableOutputs = OutputFormat.allCases
+                logger.info("folder menu fallback: all formats")
+            }
+        } else {
+            do {
+                let service = QuickActionConversionService()
+                availableOutputs = try service.availableOutputs(for: selectedURLs)
+                logger.info("availableOutputs for \(selectedURLs.first?.path ?? ""): \(availableOutputs.map { $0.rawValue })")
+            } catch {
+                logger.error("availableOutputs threw error: \(error.localizedDescription)")
+                availableOutputs = []
+            }
+        }
+
         // If there are no valid output formats for the selection, don't show the Convert menu at all
         if availableOutputs.isEmpty {
             return NSMenu(title: "")
         }
-        
+
         let menu = NSMenu(title: "")
-        let isFolder = selectedURLs.count == 1 && {
-            var isDir: ObjCBool = false
-            return FileManager.default.fileExists(atPath: selectedURLs[0].path, isDirectory: &isDir) && isDir.boolValue
-        }()
+        let isFolder = selectedURLs.count == 1 && isDirectory(selectedURLs[0])
         let title = isFolder ? "Convert Folder" : (selectedURLs.count > 1 ? "Convert \(selectedURLs.count) Files" : "Convert File")
         let convertItem = NSMenuItem(title: title, action: nil, keyEquivalent: "")
         let submenu = NSMenu(title: "Convert Formats")

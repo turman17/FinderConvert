@@ -537,6 +537,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         
         checkPendingActions()
 
+        // Answer the Finder extension's folder-content queries (the sandboxed
+        // extension can't enumerate folders itself)
+        MenuQueryServer.shared.start()
+
         // Check for updates now and periodically (the app lives in the menu
         // bar for weeks, so a launch-only check would go stale)
         checkForUpdatesInBackground()
