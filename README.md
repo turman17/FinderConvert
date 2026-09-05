@@ -7,7 +7,7 @@
 
 A native macOS utility that adds file conversion directly to Finder's right-click menu. Convert images, videos, audio, documents, and spreadsheets without opening separate apps.
 
-**[Website](https://turman17.github.io/FinderConvert-website/)** · **[Download](https://github.com/turman17/FinderConvert/releases/latest)** · `brew install --cask turman17/tap/finderconvert`
+**[Website](https://turman17.github.io/FinderConvert-website/)** · **[Download](https://github.com/turman17/FinderConvert/releases/latest)** 
 
 Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus two small static libraries (LAME for MP3, libwebp for WebP) — no ffmpeg, no Electron, a few MB total.
 
