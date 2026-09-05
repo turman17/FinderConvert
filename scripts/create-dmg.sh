@@ -2,7 +2,7 @@
 set -e
 
 APP_NAME="FinderConvert"
-VERSION="${VERSION:-1.0.3}"
+VERSION="${VERSION:-1.0.4}"
 DMG_NAME="${APP_NAME}-v${VERSION}"
 DMG_OUTPUT="$HOME/Desktop/${DMG_NAME}.dmg"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
