@@ -28,13 +28,13 @@ HEIC → JPG · WebP → PNG · MOV → MP4 · video → MP3 · PDF → JPG/PNG 
 ## Install
 
 ```bash
-brew install --cask --no-quarantine turman17/tap/finderconvert
+brew install --cask turman17/tap/finderconvert
+xattr -dr com.apple.quarantine /Applications/FinderConvert.app
 ```
 
-Or download the latest `.dmg`/`.zip` from [Releases](https://github.com/turman17/FinderConvert/releases) and move the app to `/Applications`.
+Or download the latest `.dmg`/`.zip` from [Releases](https://github.com/turman17/FinderConvert/releases), move the app to `/Applications`, and run the same `xattr` command.
 
-> **Why `--no-quarantine`?** FinderConvert is open source but not notarized (no paid Apple Developer account). If you install without the flag — or download manually — clear the quarantine once with
-> `xattr -dr com.apple.quarantine /Applications/FinderConvert.app`, or approve the app under System Settings → Privacy & Security → "Open Anyway".
+> **Why the `xattr` step?** FinderConvert is open source but not notarized (no paid Apple Developer account), so Gatekeeper blocks the first launch. Clearing the quarantine flag once fixes it — or approve the app under System Settings → Privacy & Security → "Open Anyway".
 
 ### After installing
 
