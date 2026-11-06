@@ -30,6 +30,7 @@ Run tests with:
 
 ```bash
 xcodebuild -project FinderConvert.xcodeproj -scheme FinderConvert -destination 'platform=macOS' test
+cd FinderConvertCore && swift test   # encoder, size-probe and preview tests
 ```
 
 ## Pull requests

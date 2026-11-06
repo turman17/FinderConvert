@@ -63,7 +63,7 @@ Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus
 
 - **Right-click conversion** -- select files in Finder, right-click, choose target format
 - **Folder conversion** -- right-click a folder to convert all files inside, preserving directory structure
-- **Predicted output size** -- see the estimated result size before converting, updating live as you switch formats and presets
+- **Predicted output size** -- see the estimated result size before converting, updating live as you switch formats and presets. Video estimates come from a short test encode of the actual footage, not a formula
 - **Multi-sheet XLSX** -- splits into one CSV/TSV per sheet in a named folder
 - **Multi-page PDF** -- splits into one image per page in a named folder
 - **PDF merge / split** -- combine PDFs or split one into a file per page
@@ -77,9 +77,10 @@ Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus
 
 Each format has configurable options via the slider icon in the Formats tab:
 
-- **JPEG/HEIC/AVIF/WebP** -- quality slider (10-100%)
-- **All image formats** -- resize on convert (100%, 75%, 50%, 25%), strip EXIF/GPS metadata
-- **MP4/MOV/HEVC** -- export quality (Highest, High, Medium, Low)
+- **JPEG/HEIC/AVIF/WebP** -- quality slider (10-100%) with a live before/after preview
+- **All image formats** -- resize on convert (100%, 75%, 50%, 25%), longest-edge cap (4096/2048/1024 px), strip EXIF/GPS metadata
+- **MP4/MOV/HEVC** -- export quality (Highest, High, Medium, Low). Videos are re-encoded at their original resolution in constant-quality mode (like ffmpeg's CRF), so simple footage shrinks far more than busy footage. HDR footage stays 10-bit HDR when converting to HEVC and is tone-mapped to SDR for H.264. On Macs whose encoder lacks constant-quality mode the app falls back to an equivalent bitrate
+- **Fit under a size** -- hold every output under 1/5/10/25/100 MB: images lower quality, then dimensions; videos switch to a bitrate that fits
 - **MP3/M4A** -- bitrate (64, 128, 192, 256 kbps)
 - **WAV/AIFF/M4A/MP3/FLAC** -- sample rate (22.05, 44.1, 48 kHz)
 
