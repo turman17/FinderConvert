@@ -37,5 +37,9 @@ let package = Package(
                 ]),
             ]
         ),
+        .testTarget(
+            name: "FinderConvertCoreTests",
+            dependencies: ["FinderConvertCore"]
+        ),
     ]
 )
