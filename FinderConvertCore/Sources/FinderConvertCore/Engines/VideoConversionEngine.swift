@@ -11,6 +11,7 @@ public actor VideoConversionEngine: ConversionEngine {
     private let logger = Logger(subsystem: "FinderConvert", category: "video-engine")
     private let naming = OutputNamingStrategy()
     private var activeExports: [UUID: AVAssetExportSession] = [:]
+    private var activeTranscoders: [UUID: VideoTranscoder] = [:]
 
     public init() {}
 
@@ -73,52 +74,35 @@ public actor VideoConversionEngine: ConversionEngine {
             return try publish(tempURL, sourceURL: sourceURL, job: job)
         }
 
-        let presetName: String
-        if job.requestedOutput == .hevc {
-            switch PreferencesManager.shared.videoPreset(for: .hevc) {
-            case "low": presetName = AVAssetExportPresetHEVC1920x1080
-            case "medium": presetName = AVAssetExportPresetHEVC1920x1080
-            case "high": presetName = AVAssetExportPresetHEVC3840x2160
-            default: presetName = AVAssetExportPresetHEVCHighestQuality
+        let prefs = PreferencesManager.shared
+        var options = VideoTranscoder.Options(
+            format: job.requestedOutput,
+            preset: prefs.videoPreset(for: job.requestedOutput)
+        )
+        // A size cap switches to bitrate mode when the constant-quality
+        // result would be too big; a probe of the footage decides
+        if prefs.maxOutputBytes > 0 {
+            let projected = try await VideoSizeProbe.projectedBytes(
+                sourceURL: sourceURL, format: job.requestedOutput, preset: options.preset
+            )
+            if projected > prefs.maxOutputBytes {
+                let duration = CMTimeGetSeconds(try await asset.load(.duration))
+                let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+                let audioBitRate = audioTracks.isEmpty ? 0 : VideoRateModel.audioBitRate(channels: 2)
+                options.rateMode = .averageBitRate(VideoRateModel.bitRate(fitting: prefs.maxOutputBytes, duration: duration, audioBitRate: audioBitRate))
+                logger.info("Size cap \(prefs.maxOutputBytes) B: projected \(projected) B, using bitrate mode")
             }
+        }
+
+        let transcoder = VideoTranscoder()
+        activeTranscoders[job.id] = transcoder
+        defer { activeTranscoders.removeValue(forKey: job.id) }
+        if prefs.maxOutputBytes > 0 {
+            try await transcoder.run(fittingUnder: prefs.maxOutputBytes, sourceURL: sourceURL, destination: tempURL, options: options, progress: progress)
         } else {
-            switch PreferencesManager.shared.videoPreset(for: job.requestedOutput) {
-            case "low": presetName = AVAssetExportPresetLowQuality
-            case "medium": presetName = AVAssetExportPresetMediumQuality
-            case "high": presetName = AVAssetExportPresetHighestQuality
-            default: presetName = AVAssetExportPresetHighestQuality
-            }
+            try await transcoder.run(sourceURL: sourceURL, destination: tempURL, options: options, progress: progress)
         }
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: presetName) else {
-            throw ConversionError.failedToEncodeImage(job.requestedOutput)
-        }
-
-        switch job.requestedOutput {
-        case .mp4:
-            exportSession.outputFileType = .mp4
-        case .mov:
-            exportSession.outputFileType = .mov
-        case .hevc:
-            exportSession.outputFileType = .mov
-        default:
-            throw ConversionError.unsupportedOutput(job.requestedOutput)
-        }
-
-        exportSession.outputURL = tempURL
-
-        self.activeExports[job.id] = exportSession
-        defer { self.activeExports.removeValue(forKey: job.id) }
-
-        await exportSession.export()
         _ = access
-
-        if let error = exportSession.error {
-            throw ConversionError.filesystemError(error.localizedDescription)
-        }
-
-        guard exportSession.status == .completed else {
-            throw ConversionError.filesystemError("Export did not complete successfully. Status: \(exportSession.status.rawValue)")
-        }
 
         return try publish(tempURL, sourceURL: sourceURL, job: job)
     }
@@ -137,6 +121,7 @@ public actor VideoConversionEngine: ConversionEngine {
 
     public func cancel(jobID: UUID) async {
         activeExports[jobID]?.cancelExport()
+        await activeTranscoders[jobID]?.cancel()
     }
 
     private func extractAudio(

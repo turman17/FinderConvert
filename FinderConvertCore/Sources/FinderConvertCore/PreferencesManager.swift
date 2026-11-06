@@ -78,6 +78,24 @@ public struct PreferencesManager: @unchecked Sendable {
         defaults.set(value, forKey: "resize_\(format.rawValue)")
     }
 
+    // Longest edge cap in pixels for image outputs (0 = none). Applied after
+    // the percentage resize, so a 48 MP photo can be held to 2048 px without
+    // touching small images
+    public func maxLongestEdge(for format: OutputFormat) -> Int {
+        max(0, defaults.integer(forKey: "maxEdge_\(format.rawValue)"))
+    }
+
+    public func setMaxLongestEdge(_ value: Int, for format: OutputFormat) {
+        defaults.set(value, forKey: "maxEdge_\(format.rawValue)")
+    }
+
+    // Byte budget every output must fit under (0 = off). Images lower
+    // quality, then dimensions; videos switch to a bitrate that fits
+    public var maxOutputBytes: Int64 {
+        get { Int64(defaults.integer(forKey: "maxOutputBytes")) }
+        nonmutating set { defaults.set(Int(newValue), forKey: "maxOutputBytes") }
+    }
+
     // Video export preset: "highest", "high", "medium", "low"
     public func videoPreset(for format: OutputFormat) -> String {
         defaults.string(forKey: "videoPreset_\(format.rawValue)") ?? "highest"
@@ -214,6 +232,11 @@ public struct PreferencesManager: @unchecked Sendable {
                 setResizePercent(r, for: f)
             }
         }
+        if let edge = preset.maxLongestEdge {
+            for f in OutputFormat.allCases where f.supportsResize {
+                setMaxLongestEdge(edge, for: f)
+            }
+        }
         if let p = preset.videoPreset {
             for f in OutputFormat.allCases where f.supportsVideoQuality {
                 setVideoPreset(p, for: f)
@@ -291,6 +314,7 @@ public struct PreferencesManager: @unchecked Sendable {
     private func restore(_ snap: FormatSettingsSnapshot) {
         for (key, v) in snap.quality { if let f = OutputFormat(rawValue: key) { setQuality(v, for: f) } }
         for (key, v) in snap.resize { if let f = OutputFormat(rawValue: key) { setResizePercent(v, for: f) } }
+        for (key, v) in snap.maxEdge { if let f = OutputFormat(rawValue: key) { setMaxLongestEdge(v, for: f) } }
         for (key, v) in snap.videoPreset { if let f = OutputFormat(rawValue: key) { setVideoPreset(v, for: f) } }
         for (key, v) in snap.stripMetadata { if let f = OutputFormat(rawValue: key) { setStripMetadata(v, for: f) } }
         for (key, v) in snap.audioBitrate { if let f = OutputFormat(rawValue: key) { setAudioBitrate(v, for: f) } }
@@ -300,7 +324,10 @@ public struct PreferencesManager: @unchecked Sendable {
         var snap = FormatSettingsSnapshot()
         for f in OutputFormat.allCases {
             if f.supportsQuality { snap.quality[f.rawValue] = quality(for: f) }
-            if f.supportsResize { snap.resize[f.rawValue] = resizePercent(for: f) }
+            if f.supportsResize {
+                snap.resize[f.rawValue] = resizePercent(for: f)
+                snap.maxEdge[f.rawValue] = maxLongestEdge(for: f)
+            }
             if f.supportsVideoQuality { snap.videoPreset[f.rawValue] = videoPreset(for: f) }
             if f.category == .image { snap.stripMetadata[f.rawValue] = stripMetadata(for: f) }
             if f.supportsAudioBitrate { snap.audioBitrate[f.rawValue] = audioBitrate(for: f) }
@@ -340,6 +367,7 @@ public struct PreferencesManager: @unchecked Sendable {
 struct FormatSettingsSnapshot: Codable {
     var quality: [String: Double] = [:]
     var resize: [String: Int] = [:]
+    var maxEdge: [String: Int] = [:]
     var videoPreset: [String: String] = [:]
     var stripMetadata: [String: Bool] = [:]
     var audioBitrate: [String: Int] = [:]
@@ -351,18 +379,22 @@ public struct PresetSettings: Codable, Sendable {
     public var webpQuality: Double?
     public var avifQuality: Double?
     public var resizePercent: Int?
+    // Longest edge cap in pixels; nil leaves the per-format setting alone
+    public var maxLongestEdge: Int?
     public var videoPreset: String?
     public var stripMetadata: Bool?
     public var audioBitrate: Int?
     public var description: String?
 
     public init(jpegQuality: Double? = nil, heicQuality: Double? = nil, webpQuality: Double? = nil, avifQuality: Double? = nil,
-                resizePercent: Int? = nil, videoPreset: String? = nil, stripMetadata: Bool? = nil, audioBitrate: Int? = nil, description: String? = nil) {
+                resizePercent: Int? = nil, maxLongestEdge: Int? = nil, videoPreset: String? = nil, stripMetadata: Bool? = nil,
+                audioBitrate: Int? = nil, description: String? = nil) {
         self.jpegQuality = jpegQuality
         self.heicQuality = heicQuality
         self.webpQuality = webpQuality
         self.avifQuality = avifQuality
         self.resizePercent = resizePercent
+        self.maxLongestEdge = maxLongestEdge
         self.videoPreset = videoPreset
         self.stripMetadata = stripMetadata
         self.audioBitrate = audioBitrate
@@ -377,27 +409,27 @@ public struct PresetSettings: Codable, Sendable {
         ("Image", "photo", [
         ("Web Optimized", "globe", PresetSettings(
             jpegQuality: 0.75, heicQuality: 0.75, webpQuality: 0.75, avifQuality: 0.7,
-            resizePercent: 75, stripMetadata: true,
-            description: "Balanced quality and size for websites. Strips metadata."
+            resizePercent: 100, maxLongestEdge: 2560, stripMetadata: true,
+            description: "Smaller files for websites, longest edge held to 2560 px. Strips metadata."
         )),
         ("Email Friendly", "envelope", PresetSettings(
-            jpegQuality: 0.6, heicQuality: 0.6, webpQuality: 0.6, avifQuality: 0.5,
-            resizePercent: 50, stripMetadata: true,
-            description: "Small files for email attachments. 50% resize, strips metadata."
+            jpegQuality: 0.55, heicQuality: 0.55, webpQuality: 0.55, avifQuality: 0.5,
+            resizePercent: 100, maxLongestEdge: 2048, stripMetadata: true,
+            description: "Small files for email attachments. Longest edge held to 2048 px, strips metadata."
         )),
         ("Social Media", "person.2", PresetSettings(
             jpegQuality: 0.8, heicQuality: 0.8, webpQuality: 0.8,
-            resizePercent: 75, stripMetadata: true,
+            resizePercent: 100, maxLongestEdge: 0, stripMetadata: true,
             description: "Good quality at manageable size. Strips GPS/EXIF data for privacy."
         )),
         ("Maximum Quality", "star", PresetSettings(
             jpegQuality: 1.0, heicQuality: 1.0, webpQuality: 1.0, avifQuality: 1.0,
-            resizePercent: 100, stripMetadata: false,
+            resizePercent: 100, maxLongestEdge: 0, stripMetadata: false,
             description: "Highest quality, original size, metadata preserved."
         )),
         ("Archive / Lossless", "archivebox", PresetSettings(
             jpegQuality: 1.0, heicQuality: 1.0, webpQuality: 1.0, avifQuality: 1.0,
-            resizePercent: 100, stripMetadata: false,
+            resizePercent: 100, maxLongestEdge: 0, stripMetadata: false,
             description: "Best for archival. Use with PNG or TIFF for truly lossless output."
         )),
         ("Thumbnail", "photo.on.rectangle", PresetSettings(
@@ -407,26 +439,26 @@ public struct PresetSettings: Codable, Sendable {
         )),
         ("Print Ready", "printer", PresetSettings(
             jpegQuality: 0.95, heicQuality: 0.95,
-            resizePercent: 100, stripMetadata: false,
+            resizePercent: 100, maxLongestEdge: 0, stripMetadata: false,
             description: "Near-lossless quality at full resolution. Keeps metadata for color profiles."
         )),
         ]),
         ("Video", "film", [
         ("Highest Quality", "film", PresetSettings(
             videoPreset: "highest",
-            description: "Maximum video quality. Largest file size."
+            description: "Visually identical to the original at full resolution. Largest files."
         )),
         ("Balanced", "film.stack", PresetSettings(
             videoPreset: "high",
-            description: "High quality with reasonable file size."
+            description: "Full resolution, barely distinguishable from the original. Typically 2–4x smaller."
         )),
         ("Small File", "arrow.down.circle", PresetSettings(
             videoPreset: "medium",
-            description: "Medium quality. Good for sharing and uploads."
+            description: "Full resolution with slight softening in busy scenes. Good for sharing and uploads."
         )),
         ("Compressed", "archivebox", PresetSettings(
             videoPreset: "low",
-            description: "Smallest file size. Lower quality."
+            description: "Smallest files at full resolution. Fine detail is visibly reduced."
         )),
         ]),
         ("Audio", "waveform", [

@@ -16,6 +16,8 @@ public struct OutputSizeEstimator: Sendable {
     struct Settings {
         var quality: Double
         var resizePercent: Int
+        var maxLongestEdge: Int
+        var maxOutputBytes: Int64
         var videoPreset: String
         var audioBitrate: Int
         var sampleRate: Int
@@ -34,6 +36,8 @@ public struct OutputSizeEstimator: Sendable {
             }
             quality = q
             resizePercent = preset?.resizePercent ?? prefs.resizePercent(for: format)
+            maxLongestEdge = preset?.maxLongestEdge ?? prefs.maxLongestEdge(for: format)
+            maxOutputBytes = prefs.maxOutputBytes
             videoPreset = preset?.videoPreset ?? prefs.videoPreset(for: format)
             audioBitrate = preset?.audioBitrate ?? prefs.audioBitrate(for: format)
             sampleRate = prefs.audioSampleRate(for: format)
@@ -47,17 +51,23 @@ public struct OutputSizeEstimator: Sendable {
         preset: PresetSettings? = nil
     ) async -> Int64? {
         let settings = Settings(format: output, preset: preset)
+        let estimate: Int64?
         switch input.category {
         case .image:
-            return estimateImage(url: url, output: output, settings: settings)
+            estimate = estimateImage(url: url, output: output, settings: settings)
         case .video:
-            return await estimateFromVideo(url: url, output: output, settings: settings)
+            estimate = await estimateFromVideo(url: url, output: output, settings: settings)
         case .audio:
-            return await estimateAudio(url: url, output: output, settings: settings)
+            estimate = await estimateAudio(url: url, output: output, settings: settings)
         default:
             // Documents/spreadsheets vary too wildly to guess honestly
-            return nil
+            estimate = nil
         }
+        // The engines enforce the size cap, so the prediction never exceeds it
+        if settings.maxOutputBytes > 0, let estimate, output.supportsQuality || output.supportsVideoQuality || output.category == .image {
+            return min(estimate, settings.maxOutputBytes)
+        }
+        return estimate
     }
 
     // MARK: - Image
@@ -73,7 +83,11 @@ public struct OutputSizeEstimator: Sendable {
         if output == .ico {
             pixels = 256 * 256 // fixed icon canvas
         } else {
-            let scale = Double(max(1, min(settings.resizePercent, 100))) / 100.0
+            var scale = Double(max(1, min(settings.resizePercent, 100))) / 100.0
+            let longest = Double(max(width, height)) * scale
+            if settings.maxLongestEdge > 0, longest > Double(settings.maxLongestEdge) {
+                scale *= Double(settings.maxLongestEdge) / longest
+            }
             pixels = Double(width) * Double(height) * scale * scale
         }
 
@@ -102,22 +116,23 @@ public struct OutputSizeEstimator: Sendable {
 
         switch output {
         case .mp4, .mov, .hevc:
-            guard sourceSize > 0 else { return nil }
-            let ratio: Double
-            if output == .hevc {
-                switch settings.videoPreset {
-                case "low", "medium": ratio = 0.35 // 1080p cap
-                case "high": ratio = 0.5 // 4K cap
-                default: ratio = 0.55
-                }
-            } else {
-                switch settings.videoPreset {
-                case "low": ratio = 0.12
-                case "medium": ratio = 0.35
-                default: ratio = 0.9
-                }
+            guard sourceSize > 0, seconds > 0 else { return nil }
+            // Constant-quality output depends on the footage, so encode a
+            // short slice from the middle and scale it up (cached per file)
+            if let probed = try? await VideoSizeProbe.projectedBytes(sourceURL: url, format: output, preset: settings.videoPreset) {
+                return max(50_000, probed)
             }
-            return max(50_000, Int64(Double(sourceSize) * ratio))
+            // Fallback formula: pixels per second times a measured
+            // bits-per-pixel figure, capped at the source's own data rate
+            guard let track = try? await asset.loadTracks(withMediaType: .video).first,
+                  let size = try? await track.load(.naturalSize),
+                  size.width > 0, size.height > 0 else { return nil }
+            let frameRate = Double((try? await track.load(.nominalFrameRate)) ?? 30)
+            let codec: AVVideoCodecType = output == .hevc ? .hevc : .h264
+            let bitRate = VideoRateModel.targetBitRate(preset: settings.videoPreset, width: Int(size.width), height: Int(size.height), frameRate: frameRate, codec: codec)
+            let videoBytes = min(Double(sourceSize), Double(bitRate) / 8 * seconds)
+            let audioBytes = 160_000.0 / 8 * seconds
+            return max(50_000, Int64(videoBytes + audioBytes))
         case .gif:
             guard seconds > 0 else { return nil }
             // Engine caps GIFs at 10 fps / 200 frames / 480px

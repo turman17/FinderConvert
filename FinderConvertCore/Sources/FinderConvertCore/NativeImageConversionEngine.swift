@@ -66,22 +66,24 @@ public actor NativeImageConversionEngine: ConversionEngine {
                 throw ConversionError.failedToDecodeImage
             }
 
-            // Apply per-format resize if configured (except ICO, which is
-            // always rendered at the fixed 256x256 icon size)
-            let resizePercent = PreferencesManager.shared.resizePercent(for: job.requestedOutput)
-            if resizePercent > 0 && resizePercent < 100 && job.requestedOutput != .ico {
-                let scale = Double(resizePercent) / 100.0
-                let newW = max(1, Int(Double(image.width) * scale))
-                let newH = max(1, Int(Double(image.height) * scale))
-                if let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
-                   let ctx = CGContext(data: nil, width: newW, height: newH, bitsPerComponent: 8, bytesPerRow: 0,
-                                        space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) {
-                    ctx.interpolationQuality = .high
-                    ctx.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
-                    if let resized = ctx.makeImage() {
-                        image = resized
-                        logger.info("Resized image to \(newW)x\(newH) (\(resizePercent)%)")
-                    }
+            // Apply per-format resize and longest-edge cap if configured
+            // (except ICO, which is always rendered at the fixed 256x256
+            // icon size)
+            let prefs = PreferencesManager.shared
+            if job.requestedOutput != .ico {
+                var scale = 1.0
+                let resizePercent = prefs.resizePercent(for: job.requestedOutput)
+                if resizePercent > 0 && resizePercent < 100 {
+                    scale = Double(resizePercent) / 100.0
+                }
+                let maxEdge = prefs.maxLongestEdge(for: job.requestedOutput)
+                let longest = Double(max(image.width, image.height)) * scale
+                if maxEdge > 0, longest > Double(maxEdge) {
+                    scale *= Double(maxEdge) / longest
+                }
+                if scale < 1, let resized = Self.scaled(image, by: scale) {
+                    image = resized
+                    logger.info("Resized image to \(resized.width)x\(resized.height)")
                 }
             }
 
@@ -101,41 +103,18 @@ public actor NativeImageConversionEngine: ConversionEngine {
                 try? FileManager.default.removeItem(at: tempURL)
             }
 
-            switch job.requestedOutput {
-            case .png:
-                try writeImage(image, source: source, outputFormat: .png, utType: .png, destinationURL: tempURL)
-            case .jpeg:
-                let flattened = try flattenIfNeeded(image)
-                let quality = PreferencesManager.shared.quality(for: .jpeg)
-                try writeImage(flattened, source: source, outputFormat: .jpeg, utType: .jpeg, destinationURL: tempURL, properties: [kCGImageDestinationLossyCompressionQuality: quality])
-            case .heic:
-                let utType = UTType("public.heic") ?? .image
-                let quality = PreferencesManager.shared.quality(for: .heic)
-                try writeImage(image, source: source, outputFormat: .heic, utType: utType, destinationURL: tempURL, properties: [kCGImageDestinationLossyCompressionQuality: quality])
-            case .tiff:
-                try writeImage(image, source: source, outputFormat: .tiff, utType: .tiff, destinationURL: tempURL)
-            case .gif:
-                try writeImage(image, source: source, outputFormat: .gif, utType: .gif, destinationURL: tempURL)
-            case .bmp:
-                let flattened = try flattenIfNeeded(image)
-                try writeImage(flattened, source: source, outputFormat: .bmp, utType: .bmp, destinationURL: tempURL)
-            case .ico:
-                // ImageIO's ICO encoder only accepts standard icon sizes, so
-                // render onto an exact 256x256 square canvas (aspect-fit)
-                let squared = try squareCanvas(image, size: 256)
-                let flattened = try flattenIfNeeded(squared)
-                let icoType = UTType("com.microsoft.ico") ?? .image
-                try writeImage(flattened, source: source, outputFormat: .ico, utType: icoType, destinationURL: tempURL)
-            case .avif:
-                let quality = PreferencesManager.shared.quality(for: .avif)
-                let avifType = UTType("public.avif") ?? .image
-                try writeImage(image, source: source, outputFormat: .avif, utType: avifType, destinationURL: tempURL, properties: [kCGImageDestinationLossyCompressionQuality: quality])
-            case .webp:
-                let quality = PreferencesManager.shared.quality(for: .webp)
-                try writeWebP(image, quality: Float(quality * 100), to: tempURL)
-            default:
-                throw ConversionError.unsupportedOutput(job.requestedOutput)
+            let format = job.requestedOutput
+            let metadata = metadataProperties(from: source, for: format)
+            let quality = prefs.quality(for: format)
+            var data = try encode(image, format: format, quality: quality, metadata: metadata)
+
+            // Size cap: lower the quality first, then the dimensions
+            let maxBytes = prefs.maxOutputBytes
+            if maxBytes > 0, data.count > Int(maxBytes), format != .ico {
+                data = try fit(image, format: format, startQuality: quality, metadata: metadata, under: Int(maxBytes))
+                logger.info("Size cap \(maxBytes) B: output is \(data.count) B")
             }
+            try data.write(to: tempURL)
 
             progress(0.85)
             try validateOutputExists(at: tempURL)
@@ -147,25 +126,102 @@ public actor NativeImageConversionEngine: ConversionEngine {
 
     public func cancel(jobID: UUID) async {}
 
-    private func writeImage(
-        _ image: CGImage,
-        source: CGImageSource,
-        outputFormat: OutputFormat,
-        utType: UTType,
-        destinationURL: URL,
-        properties: [CFString: Any] = [:]
-    ) throws {
-        guard let destination = CGImageDestinationCreateWithURL(destinationURL as CFURL, utType.identifier as CFString, 1, nil) else {
-            throw ConversionError.failedToEncodeImage(outputFormat)
-        }
+    private func metadataProperties(from source: CGImageSource, for format: OutputFormat) -> [CFString: Any] {
+        if PreferencesManager.shared.stripMetadata(for: format) { return [:] }
+        return (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+    }
 
-        let shouldStrip = PreferencesManager.shared.stripMetadata(for: outputFormat)
-        let metadata: [CFString: Any] = shouldStrip ? [:] : ((CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:])
-        let merged = metadata.merging(properties) { _, new in new }
-        CGImageDestinationAddImage(destination, image, merged as CFDictionary)
-        guard CGImageDestinationFinalize(destination) else {
-            throw ConversionError.failedToEncodeImage(outputFormat)
+    // Encode in memory with the format's own rules (flattening, the fixed
+    // ICO canvas, the WebP library) so the result can be measured before it
+    // is written
+    func encode(_ image: CGImage, format: OutputFormat, quality: Double, metadata: [CFString: Any]) throws -> Data {
+        switch format {
+        case .png:
+            return try encodeImageIO(image, utType: .png, format: format, properties: metadata)
+        case .jpeg:
+            return try encodeImageIO(try flattenIfNeeded(image), utType: .jpeg, format: format,
+                                     properties: metadata.merging([kCGImageDestinationLossyCompressionQuality: quality]) { _, new in new })
+        case .heic:
+            return try encodeImageIO(image, utType: UTType("public.heic") ?? .image, format: format,
+                                     properties: metadata.merging([kCGImageDestinationLossyCompressionQuality: quality]) { _, new in new })
+        case .avif:
+            return try encodeImageIO(image, utType: UTType("public.avif") ?? .image, format: format,
+                                     properties: metadata.merging([kCGImageDestinationLossyCompressionQuality: quality]) { _, new in new })
+        case .tiff:
+            return try encodeImageIO(image, utType: .tiff, format: format, properties: metadata)
+        case .gif:
+            return try encodeImageIO(image, utType: .gif, format: format, properties: metadata)
+        case .bmp:
+            return try encodeImageIO(try flattenIfNeeded(image), utType: .bmp, format: format, properties: metadata)
+        case .ico:
+            // ImageIO's ICO encoder only accepts standard icon sizes, so
+            // render onto an exact 256x256 square canvas (aspect-fit)
+            let squared = try squareCanvas(image, size: 256)
+            return try encodeImageIO(try flattenIfNeeded(squared), utType: UTType("com.microsoft.ico") ?? .image, format: format, properties: metadata)
+        case .webp:
+            return try Self.encodeWebP(image, quality: Float(quality * 100))
+        default:
+            throw ConversionError.unsupportedOutput(format)
         }
+    }
+
+    private func encodeImageIO(_ image: CGImage, utType: UTType, format: OutputFormat, properties: [CFString: Any]) throws -> Data {
+        let data = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(data, utType.identifier as CFString, 1, nil) else {
+            throw ConversionError.failedToEncodeImage(format)
+        }
+        CGImageDestinationAddImage(destination, image, properties as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else {
+            throw ConversionError.failedToEncodeImage(format)
+        }
+        return data as Data
+    }
+
+    // Shrinks an encode under a byte budget. Lossy formats binary-search the
+    // quality down to 25% first; when that is not enough (or the format is
+    // lossless) the dimensions come down in steps. Returns the best effort
+    // if even a tiny image will not fit
+    func fit(_ image: CGImage, format: OutputFormat, startQuality: Double, metadata: [CFString: Any], under maxBytes: Int) throws -> Data {
+        var current = image
+        var best: Data?
+        for _ in 0..<6 {
+            if format.supportsQuality {
+                var low = 0.25, high = startQuality
+                var fitting: Data?
+                var largest = try encode(current, format: format, quality: low, metadata: metadata)
+                if largest.count <= maxBytes {
+                    fitting = largest
+                    for _ in 0..<6 {
+                        let mid = (low + high) / 2
+                        let candidate = try encode(current, format: format, quality: mid, metadata: metadata)
+                        if candidate.count <= maxBytes { fitting = candidate; low = mid } else { high = mid }
+                    }
+                    return fitting ?? largest
+                }
+                best = largest
+            } else {
+                let candidate = try encode(current, format: format, quality: startQuality, metadata: metadata)
+                if candidate.count <= maxBytes { return candidate }
+                best = candidate
+            }
+            // Still too big: scale the area down by the overshoot, with margin
+            let ratio = min(0.9, (Double(maxBytes) / Double(best?.count ?? maxBytes)).squareRoot() * 0.92)
+            guard current.width > 64, current.height > 64, let smaller = Self.scaled(current, by: ratio) else { break }
+            current = smaller
+        }
+        if let best { return best }
+        return try encode(current, format: format, quality: startQuality, metadata: metadata)
+    }
+
+    static func scaled(_ image: CGImage, by scale: Double) -> CGImage? {
+        let newW = max(1, Int((Double(image.width) * scale).rounded()))
+        let newH = max(1, Int((Double(image.height) * scale).rounded()))
+        guard let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
+              let ctx = CGContext(data: nil, width: newW, height: newH, bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: colorSpace, bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { return nil }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: newW, height: newH))
+        return ctx.makeImage()
     }
 
     private func flattenIfNeeded(_ image: CGImage) throws -> CGImage {
@@ -217,7 +273,7 @@ public actor NativeImageConversionEngine: ConversionEngine {
         return squared
     }
 
-    private func writeWebP(_ image: CGImage, quality: Float, to url: URL) throws {
+    static func encodeWebP(_ image: CGImage, quality: Float) throws -> Data {
         let width = image.width
         let height = image.height
         guard let colorSpace = image.colorSpace ?? CGColorSpace(name: CGColorSpace.sRGB),
@@ -234,8 +290,7 @@ public actor NativeImageConversionEngine: ConversionEngine {
         guard size > 0, let outputPtr = output else { throw ConversionError.failedToEncodeImage(.webp) }
         defer { WebPFree(outputPtr) }
 
-        let webpData = Data(bytes: outputPtr, count: Int(size))
-        try webpData.write(to: url)
+        return Data(bytes: outputPtr, count: Int(size))
     }
 
     private func validateOutputExists(at url: URL) throws {
