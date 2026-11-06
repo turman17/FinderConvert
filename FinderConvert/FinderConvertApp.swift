@@ -311,7 +311,9 @@ struct MenuBarDropView: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        var newURLs: [URL] = []
+        // Appended and read on the main queue only; the group's notify runs
+        // after every enqueued append, so the unchecked capture is safe
+        nonisolated(unsafe) var newURLs: [URL] = []
         let group = DispatchGroup()
         for provider in providers {
             group.enter()
@@ -656,10 +658,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
         popover.behavior = .transient
         popover.animates = true
 
+        // Let the popover follow the SwiftUI content: it grows when files are
+        // dropped in and the format row appears, instead of clipping them
         let controller = NSHostingController(rootView: MenuBarDropView(appDelegate: self))
-        controller.view.setFrameSize(NSSize(width: 220, height: 1))
-        let fitting = controller.view.fittingSize
-        popover.contentSize = NSSize(width: 220, height: fitting.height)
+        controller.sizingOptions = [.preferredContentSize]
         popover.contentViewController = controller
 
         self.menuBarPopover = popover
@@ -1448,6 +1450,8 @@ struct ConverterTab: View {
     @State private var activePresetName = ""
     @State private var convertedResults: [ConversionResult] = []
     @State private var estimatedSizes: [UUID: Int64] = [:]
+    @State private var showFormatInfo = false
+    @State private var maxOutputBytes: Int64 = PreferencesManager.shared.maxOutputBytes
 
     // Which file categories a preset's settings are meaningful for
     private func presetCategories(_ s: PresetSettings) -> Set<FileCategory> {
@@ -1735,6 +1739,29 @@ struct ConverterTab: View {
                         .foregroundStyle(Color.accentColor)
                 }
                 Spacer()
+
+                // Byte budget: images drop quality then size, videos switch
+                // to a bitrate that fits
+                Text("Fit under")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                Picker("", selection: $maxOutputBytes) {
+                    Text("Any size").tag(Int64(0))
+                    Text("1 MB").tag(Int64(1_000_000))
+                    Text("5 MB").tag(Int64(5_000_000))
+                    Text("10 MB").tag(Int64(10_000_000))
+                    Text("25 MB").tag(Int64(25_000_000))
+                    Text("100 MB").tag(Int64(100_000_000))
+                }
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .controlSize(.small)
+                .fixedSize()
+                .help("Every output is held under this size")
+                .onChange(of: maxOutputBytes) { _, val in
+                    PreferencesManager.shared.maxOutputBytes = val
+                    refreshEstimates()
+                }
             }
             .padding(.horizontal, 32)
             .padding(.bottom, 6)
@@ -1760,13 +1787,39 @@ struct ConverterTab: View {
                 .pickerStyle(.menu)
                 .frame(width: 180)
 
+                Button {
+                    showFormatInfo.toggle()
+                } label: {
+                    Image(systemName: "info.circle")
+                        .font(.system(size: 13))
+                        .foregroundStyle(showFormatInfo ? Color.accentColor : Color.secondary)
+                }
+                .buttonStyle(.plain)
+                .help("What this format and quality setting will look like")
+                .popover(isPresented: $showFormatInfo, arrowEdge: .top) {
+                    if let format = OutputFormat(rawValue: selectedFormatId) {
+                        // A per-file preset overrides the global settings at
+                        // convert time, so show its effect when the dropped
+                        // files agree on one
+                        let overrides = Set(droppedFiles.compactMap(\.presetOverride))
+                        let presetName = overrides.count == 1 ? overrides.first : nil
+                        FormatInfoPopover(
+                            format: format,
+                            presetName: presetName,
+                            preset: presetName.flatMap { PreferencesManager.shared.presetSettings(named: $0) }
+                        )
+                    }
+                }
+
                 Spacer()
 
                 Button(action: convertFiles) {
                     Label("Convert", systemImage: "arrow.triangle.2.circlepath")
+                        .labelStyle(.titleAndIcon)
                         .font(.body.weight(.semibold))
                         .padding(.horizontal, 12)
                         .padding(.vertical, 6)
+                        .fixedSize()
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
@@ -1865,7 +1918,9 @@ struct ConverterTab: View {
     }
 
     private func handleDrop(providers: [NSItemProvider]) -> Bool {
-        var newURLs: [URL] = []
+        // Appended and read on the main queue only; the group's notify runs
+        // after every enqueued append, so the unchecked capture is safe
+        nonisolated(unsafe) var newURLs: [URL] = []
         let group = DispatchGroup()
         for provider in providers {
             group.enter()
@@ -2070,11 +2125,13 @@ struct FormatRowView: View {
     @State private var showSettings = false
     @State private var quality: Double
     @State private var resizePercent: Int
+    @State private var maxEdge: Int
     @State private var videoPreset: String
     @State private var audioSampleRate: Int
     @State private var audioBitrate: Int
     @State private var stripMetadata: Bool
     @State private var markdownStyle: MarkdownStyle
+    @State private var showQualityPreview = false
 
     private var supportsMarkdownStyle: Bool {
         format == .pdf || format == .html
@@ -2089,6 +2146,7 @@ struct FormatRowView: View {
         self._enabledFormats = enabledFormats
         self._quality = State(initialValue: PreferencesManager.shared.quality(for: format))
         self._resizePercent = State(initialValue: PreferencesManager.shared.resizePercent(for: format))
+        self._maxEdge = State(initialValue: PreferencesManager.shared.maxLongestEdge(for: format))
         self._videoPreset = State(initialValue: PreferencesManager.shared.videoPreset(for: format))
         self._audioSampleRate = State(initialValue: PreferencesManager.shared.audioSampleRate(for: format))
         self._audioBitrate = State(initialValue: PreferencesManager.shared.audioBitrate(for: format))
@@ -2164,6 +2222,9 @@ struct FormatRowView: View {
         if format.supportsResize && resizePercent < 100 {
             parts.append("\(resizePercent)%sz")
         }
+        if format.supportsResize && maxEdge > 0 {
+            parts.append("≤\(maxEdge)px")
+        }
         if format.supportsVideoQuality && videoPreset != "highest" {
             parts.append(videoPreset)
         }
@@ -2182,6 +2243,18 @@ struct FormatRowView: View {
         return parts.joined(separator: " ")
     }
 
+    private var qualityPreviewToggle: some View {
+        Button {
+            withAnimation(.easeInOut(duration: 0.15)) { showQualityPreview.toggle() }
+        } label: {
+            Image(systemName: showQualityPreview ? "info.circle.fill" : "info.circle")
+                .font(.caption)
+                .foregroundStyle(showQualityPreview ? Color.accentColor : Color.secondary)
+        }
+        .buttonStyle(.plain)
+        .help("Preview how this setting looks")
+    }
+
     @ViewBuilder
     private var formatSettingsPopover: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -2190,9 +2263,10 @@ struct FormatRowView: View {
 
             if format.supportsQuality {
                 VStack(alignment: .leading, spacing: 8) {
-                    HStack {
+                    HStack(spacing: 4) {
                         Text("Quality")
                             .font(.subheadline)
+                        qualityPreviewToggle
                         Spacer()
                         Text("\(Int(quality * 100))%")
                             .font(.system(.subheadline, design: .monospaced))
@@ -2210,6 +2284,9 @@ struct FormatRowView: View {
                         Text("Best quality")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                    }
+                    if showQualityPreview {
+                        QualityPreviewView(format: format, quality: quality, videoPreset: videoPreset)
                     }
                 }
             }
@@ -2229,13 +2306,34 @@ struct FormatRowView: View {
                     .onChange(of: resizePercent) { _, val in
                         PreferencesManager.shared.setResizePercent(val, for: format)
                     }
+                    Text("Longest edge")
+                        .font(.subheadline)
+                        .padding(.top, 4)
+                    Picker("", selection: $maxEdge) {
+                        Text("Any").tag(0)
+                        Text("4096").tag(4096)
+                        Text("2048").tag(2048)
+                        Text("1024").tag(1024)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .onChange(of: maxEdge) { _, val in
+                        PreferencesManager.shared.setMaxLongestEdge(val, for: format)
+                    }
+                    Text("Only images larger than this are scaled down, so small images keep their size.")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
             if format.supportsVideoQuality {
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Export quality")
-                        .font(.subheadline)
+                    HStack(spacing: 4) {
+                        Text("Export quality")
+                            .font(.subheadline)
+                        qualityPreviewToggle
+                    }
                     Picker("", selection: $videoPreset) {
                         Text("Highest").tag("highest")
                         Text("High").tag("high")
@@ -2247,6 +2345,13 @@ struct FormatRowView: View {
                     .onChange(of: videoPreset) { _, val in
                         PreferencesManager.shared.setVideoPreset(val, for: format)
                     }
+                    if showQualityPreview {
+                        QualityPreviewView(format: format, quality: quality, videoPreset: videoPreset)
+                    }
+                    Text("Keeps the original resolution. Lower settings re-encode at a lower constant quality, like ffmpeg's CRF, so simple footage shrinks more than busy footage.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
 
@@ -2324,6 +2429,181 @@ struct FormatRowView: View {
     }
 }
 
+
+// MARK: - Quality preview
+
+// Shown from the (i) beside the Converter's format picker: what the chosen
+// format does, and for lossy formats a live preview of the current quality
+// setting (including whatever preset is active)
+struct FormatInfoPopover: View {
+    let format: OutputFormat
+    private let presetName: String?
+    private let quality: Double
+    private let videoPreset: String
+    private let resizePercent: Int
+    private let maxLongestEdge: Int
+
+    // Explicit preset values win over the current preferences, mirroring
+    // how per-file presets apply during conversion
+    init(format: OutputFormat, presetName: String? = nil, preset: PresetSettings? = nil) {
+        self.format = format
+        self.presetName = preset == nil ? nil : presetName
+        let prefs = PreferencesManager.shared
+        var q = prefs.quality(for: format)
+        if let preset {
+            switch format {
+            case .jpeg: q = preset.jpegQuality ?? q
+            case .heic: q = preset.heicQuality ?? q
+            case .webp: q = preset.webpQuality ?? q
+            case .avif: q = preset.avifQuality ?? q
+            default: break
+            }
+        }
+        quality = q
+        videoPreset = preset?.videoPreset ?? prefs.videoPreset(for: format)
+        resizePercent = preset?.resizePercent ?? prefs.resizePercent(for: format)
+        maxLongestEdge = preset?.maxLongestEdge ?? prefs.maxLongestEdge(for: format)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("\(format.displayName) (.\(format.preferredExtension))")
+                .font(.headline)
+            Text(description)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if QualityPreviewRenderer.supportsPreview(format) {
+                Divider()
+                Text(settingLine)
+                    .font(.subheadline)
+                QualityPreviewView(format: format, quality: quality, videoPreset: videoPreset)
+            }
+            let cap = PreferencesManager.shared.maxOutputBytes
+            if cap > 0, format.category == .image || format.supportsVideoQuality {
+                Text("Outputs are held under \(formatFileSize(cap)): quality is lowered first, then dimensions; videos use a bitrate that fits.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(16)
+        .frame(width: 292)
+    }
+
+    private var settingLine: String {
+        let source = presetName.map { "Preset \"\($0)\"" } ?? "Current setting"
+        if format.supportsVideoQuality {
+            let name = ["highest": "Highest", "high": "High", "medium": "Medium", "low": "Low"][videoPreset] ?? videoPreset
+            return "\(source): \(name)"
+        }
+        var line = "\(source): \(Int(quality * 100))% quality"
+        if resizePercent < 100 { line += ", resized to \(resizePercent)%" }
+        if maxLongestEdge > 0 { line += ", longest edge \(maxLongestEdge) px" }
+        return line
+    }
+
+    private var description: String {
+        switch format {
+        case .jpeg: return "Lossy photo format every device opens. Smaller at lower quality; transparency is flattened to white."
+        case .heic: return "Apple's modern photo format: about half the size of JPEG at the same quality. Opens on Apple devices and Windows 10+."
+        case .avif: return "Newest web photo format, smallest files at the same quality. Needs a recent browser or OS."
+        case .webp: return "Web photo format with good compression and transparency. Supported by all current browsers."
+        case .png: return "Lossless: every pixel kept, transparency preserved. Large for photos, ideal for screenshots and graphics."
+        case .tiff: return "Lossless, uncompressed. Very large files; used for print and archiving."
+        case .gif: return "256 colours only, so photos look posterised. Videos become silent animated GIFs at 10 fps, capped at 480 px."
+        case .bmp: return "Uncompressed Windows bitmap. Very large files, no transparency."
+        case .ico: return "Windows icon rendered at 256 x 256."
+        case .mp4: return "H.264 video in an MP4 container: plays everywhere. Re-encoded at the original resolution using the quality setting below."
+        case .mov: return "H.264 video in a QuickTime container. Same encoding as MP4, preferred by Apple apps."
+        case .hevc: return "H.265 video: about 40% smaller than H.264 at the same quality. Plays on Apple devices and most modern players."
+        case .mp3: return "Audio only. The video track is dropped; universally playable."
+        case .m4a: return "AAC audio only, better quality than MP3 at the same bitrate."
+        case .wav, .aiff: return "Uncompressed audio only. Large files, no quality loss."
+        case .flac: return "Lossless compressed audio only."
+        case .pdf: return "Page document; images are placed on a page, text documents are laid out."
+        case .rtf, .html, .txt, .docx: return "Text document conversion. Formatting is kept where the target format supports it."
+        case .csv, .tsv, .xlsx: return "Spreadsheet conversion. Formulas become values."
+        }
+    }
+}
+
+// Encodes a bundled sample with the current setting and shows a magnified
+// crop next to the original, so "70%" or "Medium" becomes something you can
+// see. Re-renders whenever the setting changes
+struct QualityPreviewView: View {
+    let format: OutputFormat
+    let quality: Double
+    let videoPreset: String
+    @State private var preview: QualityPreview?
+    @State private var failed = false
+
+    // The sign, colour patches and grass: the part of the sample where
+    // ringing, blocking and chroma bleed show first
+    private let crop = CGRect(x: 240, y: 185, width: 260, height: 130)
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            if let preview {
+                tile(preview.original, label: "Original")
+                tile(preview.encoded, label: encodedLabel)
+                Text(caption(for: preview))
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else if failed {
+                Text("Preview unavailable for this format.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                ProgressView()
+                    .controlSize(.small)
+                    .frame(maxWidth: .infinity, minHeight: 60)
+            }
+        }
+        .padding(.top, 4)
+        .task(id: "\(format.rawValue)-\(quality)-\(videoPreset)") {
+            do {
+                let rendered = try await QualityPreviewRenderer.render(format: format, quality: quality, videoPreset: videoPreset)
+                if !Task.isCancelled { preview = rendered; failed = false }
+            } catch {
+                if !Task.isCancelled { failed = true }
+            }
+        }
+    }
+
+    private var encodedLabel: String {
+        if format.supportsVideoQuality {
+            let name = ["highest": "Highest", "high": "High", "medium": "Medium", "low": "Low"][videoPreset] ?? videoPreset
+            return "\(format.displayName) · \(name)"
+        }
+        return "\(format.displayName) · \(Int(quality * 100))%"
+    }
+
+    private func caption(for preview: QualityPreview) -> String {
+        if let perMegapixel = preview.bytesPerMegapixel {
+            let photo = formatFileSize(Int64(perMegapixel) * 12)
+            return "Sample: \(formatFileSize(Int64(preview.encodedBytes))). About \(formatFileSize(Int64(perMegapixel))) per megapixel, so a 12 MP photo is roughly \(photo)."
+        }
+        return "One frame through the same encoder at this setting. Shown at 2x; resolution is kept."
+    }
+
+    private func tile(_ image: CGImage, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            if let cropped = image.cropping(to: crop) {
+                Image(decorative: cropped, scale: 1)
+                    .interpolation(.none)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(width: 260, height: 130)
+                    .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
+            }
+            Text(label)
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+    }
+}
 
 // MARK: - History
 
@@ -3041,6 +3321,90 @@ struct SettingsTab: View {
 
 // MARK: - Onboarding
 
+// "One file becomes another": a .heic document fades in, the two logo arcs
+// draw themselves around it while the label rolls to .jpg, and the whole
+// mark settles with a soft spring. ~1.2s total
+struct StartupAnimationView: View {
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var fileVisible = false
+    @State private var arcProgress: CGFloat = 0
+    @State private var spinning = false
+    @State private var converted = false
+    @State private var settled = false
+
+    var body: some View {
+        Group {
+            if reduceMotion {
+                Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
+                    .font(.system(size: 72))
+                    .foregroundStyle(.tint)
+                    .symbolRenderingMode(.hierarchical)
+                    .opacity(fileVisible ? 1 : 0)
+                    .onAppear {
+                        withAnimation(.easeOut(duration: 0.4)) { fileVisible = true }
+                    }
+            } else {
+                animatedMark
+            }
+        }
+        .frame(width: 150, height: 150)
+    }
+
+    private var animatedMark: some View {
+        ZStack {
+            // The two arcs of the logo, drawing along their paths while
+            // rotating half a turn
+            ForEach(0..<2, id: \.self) { index in
+                Circle()
+                    .trim(from: 0.06, to: 0.06 + arcProgress * 0.36)
+                    .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 6, lineCap: .round))
+                    .frame(width: 116, height: 116)
+                    .rotationEffect(.degrees((spinning ? 90 : -90) + Double(index) * 180))
+            }
+
+            // The file being converted
+            VStack(spacing: 3) {
+                Image(systemName: "doc.fill")
+                    .font(.system(size: 32))
+                    .foregroundStyle(converted ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.secondary))
+                ZStack {
+                    if converted {
+                        Text(".jpg")
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .bottom).combined(with: .opacity),
+                                removal: .move(edge: .top).combined(with: .opacity)))
+                    } else {
+                        Text(".heic")
+                            .transition(.asymmetric(
+                                insertion: .move(edge: .bottom).combined(with: .opacity),
+                                removal: .move(edge: .top).combined(with: .opacity)))
+                    }
+                }
+                .font(.system(.caption, design: .monospaced).weight(.semibold))
+                .foregroundStyle(.secondary)
+                .frame(height: 14)
+                .clipped()
+            }
+            .opacity(fileVisible ? 1 : 0)
+            .offset(y: fileVisible ? 0 : 8)
+        }
+        .scaleEffect(settled ? 0.92 : 1.0)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.3)) { fileVisible = true }
+            withAnimation(.easeInOut(duration: 0.5).delay(0.3)) {
+                arcProgress = 1
+                spinning = true
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+                withAnimation(.spring(duration: 0.3)) { converted = true }
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.85) {
+                withAnimation(.spring(response: 0.35, dampingFraction: 0.8)) { settled = true }
+            }
+        }
+    }
+}
+
 struct OnboardingView: View {
     let onComplete: () -> Void
     @State private var currentPage = 0
@@ -3125,27 +3489,33 @@ struct OnboardingView: View {
 
     // MARK: - Pages
 
+    @State private var welcomeTextShown = false
+
     private var welcomePage: some View {
         VStack(spacing: 20) {
             Spacer()
 
-            Image(systemName: "arrow.triangle.2.circlepath.circle.fill")
-                .font(.system(size: 72))
-                .foregroundStyle(.tint)
-                .symbolRenderingMode(.hierarchical)
+            StartupAnimationView()
 
-            Text("Welcome to FinderConvert")
-                .font(.title.weight(.bold))
+            Group {
+                Text("Welcome to FinderConvert")
+                    .font(.title.weight(.bold))
 
-            Text("Convert any file directly from Finder.\nImages, videos, audio, documents, and more.")
-                .font(.body)
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(4)
+                Text("Convert any file directly from Finder.\nImages, videos, audio, documents, and more.")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .lineSpacing(4)
+            }
+            .opacity(welcomeTextShown ? 1 : 0)
+            .offset(y: welcomeTextShown ? 0 : 6)
 
             Spacer()
         }
         .padding(32)
+        .onAppear {
+            withAnimation(.easeOut(duration: 0.5).delay(0.9)) { welcomeTextShown = true }
+        }
     }
 
     private var permissionsPage: some View {
@@ -3437,6 +3807,7 @@ struct CreatePresetSheet: View {
     // Image settings
     @State private var quality: Double = 0.9
     @State private var resize: Int = 100
+    @State private var maxEdge: Int = 0
     @State private var stripMeta = false
 
     // Video settings
@@ -3493,6 +3864,16 @@ struct CreatePresetSheet: View {
                         .pickerStyle(.segmented)
                         .labelsHidden()
 
+                        Text("Longest edge").font(.subheadline)
+                        Picker("", selection: $maxEdge) {
+                            Text("Any").tag(0)
+                            Text("4096").tag(4096)
+                            Text("2048").tag(2048)
+                            Text("1024").tag(1024)
+                        }
+                        .pickerStyle(.segmented)
+                        .labelsHidden()
+
                         Divider()
 
                         Toggle("Strip metadata (EXIF / GPS)", isOn: $stripMeta)
@@ -3515,6 +3896,10 @@ struct CreatePresetSheet: View {
                         }
                         .pickerStyle(.segmented)
                         .labelsHidden()
+                        Text("Keeps the original resolution. Lower settings re-encode at a lower constant quality, like ffmpeg's CRF, so simple footage shrinks more than busy footage.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(4)
                 } label: {
@@ -3562,6 +3947,7 @@ struct CreatePresetSheet: View {
                         webpQuality: selectedType == .image ? quality : nil,
                         avifQuality: selectedType == .image ? quality : nil,
                         resizePercent: selectedType == .image ? resize : nil,
+                        maxLongestEdge: selectedType == .image ? maxEdge : nil,
                         videoPreset: selectedType == .video ? videoPreset : nil,
                         stripMetadata: selectedType == .image ? stripMeta : nil,
                         audioBitrate: selectedType == .audio ? audioBitrate : nil
@@ -3596,6 +3982,7 @@ struct EditPresetSheet: View {
 
     @State private var quality: Double
     @State private var resize: Int
+    @State private var maxEdge: Int
     @State private var stripMeta: Bool
     @State private var videoPreset: String
     @State private var audioBitrate: Int
@@ -3617,6 +4004,7 @@ struct EditPresetSheet: View {
         hasBitrate = s.audioBitrate != nil
         self._quality = State(initialValue: s.jpegQuality ?? s.heicQuality ?? s.webpQuality ?? s.avifQuality ?? 0.9)
         self._resize = State(initialValue: s.resizePercent ?? 100)
+        self._maxEdge = State(initialValue: s.maxLongestEdge ?? 0)
         self._stripMeta = State(initialValue: s.stripMetadata ?? false)
         self._videoPreset = State(initialValue: s.videoPreset ?? "highest")
         self._audioBitrate = State(initialValue: s.audioBitrate ?? 128000)
@@ -3652,6 +4040,15 @@ struct EditPresetSheet: View {
                         Text("75%").tag(75)
                         Text("50%").tag(50)
                         Text("25%").tag(25)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Text("Longest edge").font(.subheadline)
+                    Picker("", selection: $maxEdge) {
+                        Text("Any").tag(0)
+                        Text("4096").tag(4096)
+                        Text("2048").tag(2048)
+                        Text("1024").tag(1024)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
@@ -3720,7 +4117,10 @@ struct EditPresetSheet: View {
             if s.webpQuality != nil { s.webpQuality = quality }
             if s.avifQuality != nil { s.avifQuality = quality }
         }
-        if hasResize { s.resizePercent = resize }
+        if hasResize {
+            s.resizePercent = resize
+            s.maxLongestEdge = maxEdge
+        }
         if hasStrip { s.stripMetadata = stripMeta }
         if hasVideo { s.videoPreset = videoPreset }
         if hasBitrate { s.audioBitrate = audioBitrate }
