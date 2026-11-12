@@ -9,8 +9,8 @@
 # After each release, update `version` and `sha256` (scripts/release.sh
 # prints both).
 cask "finderconvert" do
-  version "1.1.0"
-  sha256 "89096720ce3a5351c011869c1c8a00de5d91d15db8f861873b6b7a164e240a2a"
+  version "1.2.0"
+  sha256 "428b65e6762862a366d2219b8c10769effc2d283c898ea46deca925fe8d11815"
 
   url "https://github.com/turman17/FinderConvert/releases/download/v#{version}/FinderConvert-v#{version}.zip"
   name "FinderConvert"
