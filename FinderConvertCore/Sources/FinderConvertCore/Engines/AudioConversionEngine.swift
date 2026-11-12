@@ -8,7 +8,6 @@ public actor AudioConversionEngine: ConversionEngine {
     public let identifier = "com.finderconvert.engine.audio.native"
     private let logger = Logger(subsystem: "FinderConvert", category: "audio-engine")
     private let naming = OutputNamingStrategy()
-    private var activeExports: [UUID: AVAssetExportSession] = [:]
 
     public init() {}
 
@@ -48,15 +47,7 @@ public actor AudioConversionEngine: ConversionEngine {
         switch job.requestedOutput {
         case .mp3:
             try await exportToMP3(source: sourceURL, destination: destinationURL, progress: progress)
-        case .m4a:
-            try await exportWithSession(
-                source: sourceURL,
-                destination: destinationURL,
-                fileType: .m4a,
-                jobID: job.id,
-                progress: progress
-            )
-        case .wav, .aiff:
+        case .m4a, .wav, .aiff:
             try await exportWithAssetWriter(
                 source: sourceURL,
                 destination: destinationURL,
@@ -78,9 +69,7 @@ public actor AudioConversionEngine: ConversionEngine {
         return ConversionResult(sourceURL: sourceURL, outputURL: destinationURL, outputFormat: job.requestedOutput)
     }
 
-    public func cancel(jobID: UUID) async {
-        activeExports[jobID]?.cancelExport()
-    }
+    public func cancel(jobID: UUID) async {}
 
     // MARK: - MP3 via LAME
 
@@ -176,34 +165,6 @@ public actor AudioConversionEngine: ConversionEngine {
         }
     }
 
-    private func exportWithSession(
-        source: URL,
-        destination: URL,
-        fileType: AVFileType,
-        jobID: UUID,
-        progress: @escaping @Sendable (Double) -> Void
-    ) async throws {
-        let asset = AVURLAsset(url: source)
-        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
-            throw ConversionError.filesystemError("Could not create audio export session.")
-        }
-
-        exportSession.outputFileType = fileType
-        exportSession.outputURL = destination
-
-        self.activeExports[jobID] = exportSession
-        defer { self.activeExports.removeValue(forKey: jobID) }
-
-        await exportSession.export()
-
-        if let error = exportSession.error {
-            throw ConversionError.filesystemError(error.localizedDescription)
-        }
-        guard exportSession.status == .completed else {
-            throw ConversionError.filesystemError("Audio export did not complete. Status: \(exportSession.status.rawValue)")
-        }
-    }
-
     private func exportWithAssetWriter(
         source: URL,
         destination: URL,
@@ -218,17 +179,29 @@ public actor AudioConversionEngine: ConversionEngine {
             throw ConversionError.filesystemError("No audio track found in source file.")
         }
 
-        let sampleRate = PreferencesManager.shared.audioSampleRate(for: output)
+        let prefs = PreferencesManager.shared
+        let sampleRate = prefs.audioSampleRate(for: output)
+        let channels = output.supportsAudioChannels ? prefs.audioChannels(for: output) : 2
         let fileType: AVFileType
         let outputSettings: [String: Any]
 
         switch output {
+        case .m4a:
+            // AAC at the chosen bitrate; the Apple M4A export preset this
+            // replaced ignored the bitrate setting
+            fileType = .m4a
+            outputSettings = [
+                AVFormatIDKey: kAudioFormatMPEG4AAC,
+                AVSampleRateKey: sampleRate,
+                AVNumberOfChannelsKey: channels,
+                AVEncoderBitRateKey: prefs.audioBitrate(for: output),
+            ]
         case .wav:
             fileType = .wav
             outputSettings = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: 2,
+                AVNumberOfChannelsKey: channels,
                 AVLinearPCMBitDepthKey: 16,
                 AVLinearPCMIsFloatKey: false,
                 AVLinearPCMIsBigEndianKey: false,
@@ -239,7 +212,7 @@ public actor AudioConversionEngine: ConversionEngine {
             outputSettings = [
                 AVFormatIDKey: kAudioFormatLinearPCM,
                 AVSampleRateKey: sampleRate,
-                AVNumberOfChannelsKey: 2,
+                AVNumberOfChannelsKey: channels,
                 AVLinearPCMBitDepthKey: 16,
                 AVLinearPCMIsFloatKey: false,
                 AVLinearPCMIsBigEndianKey: true,
@@ -257,7 +230,7 @@ public actor AudioConversionEngine: ConversionEngine {
         let readerOutputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 2,
+            AVNumberOfChannelsKey: channels,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
@@ -316,6 +289,7 @@ public actor AudioConversionEngine: ConversionEngine {
         }
 
         let sampleRate = PreferencesManager.shared.audioSampleRate(for: .flac)
+        let channels = PreferencesManager.shared.audioChannels(for: .flac)
         let duration = try await asset.load(.duration)
         let totalSeconds = CMTimeGetSeconds(duration)
 
@@ -323,7 +297,7 @@ public actor AudioConversionEngine: ConversionEngine {
         let readerSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVSampleRateKey: sampleRate,
-            AVNumberOfChannelsKey: 2,
+            AVNumberOfChannelsKey: channels,
             AVLinearPCMBitDepthKey: 16,
             AVLinearPCMIsFloatKey: false,
             AVLinearPCMIsBigEndianKey: false,
@@ -342,10 +316,10 @@ public actor AudioConversionEngine: ConversionEngine {
             mSampleRate: Float64(sampleRate),
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsSignedInteger | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 4,
+            mBytesPerPacket: UInt32(2 * channels),
             mFramesPerPacket: 1,
-            mBytesPerFrame: 4,
-            mChannelsPerFrame: 2,
+            mBytesPerFrame: UInt32(2 * channels),
+            mChannelsPerFrame: UInt32(channels),
             mBitsPerChannel: 16,
             mReserved: 0
         )
@@ -357,7 +331,7 @@ public actor AudioConversionEngine: ConversionEngine {
             mBytesPerPacket: 0,
             mFramesPerPacket: 0,
             mBytesPerFrame: 0,
-            mChannelsPerFrame: 2,
+            mChannelsPerFrame: UInt32(channels),
             mBitsPerChannel: 0,
             mReserved: 0
         )
@@ -412,7 +386,7 @@ public actor AudioConversionEngine: ConversionEngine {
             guard let rawData = dataPointer else { continue }
 
             var audioBuffer = AudioBuffer(
-                mNumberChannels: 2,
+                mNumberChannels: UInt32(channels),
                 mDataByteSize: UInt32(length),
                 mData: UnsafeMutableRawPointer(rawData)
             )

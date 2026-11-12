@@ -100,26 +100,10 @@ public struct QuickActionConversionService: Sendable {
                     try file.url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
                 }
                 
-                let policy: DestinationPolicy
-                let prefs = PreferencesManager.shared
-                if prefs.useCustomOutputFolder, let customFolder = prefs.customOutputFolder {
-                    // Custom output folder: mirror structure into chosen folder
-                    if let root = originalRoot {
-                        policy = .mirroredDirectory(originalRoot: root, newRoot: customFolder.appending(path: root.lastPathComponent, directoryHint: .isDirectory))
-                    } else {
-                        policy = .mirroredDirectory(originalRoot: file.url.deletingLastPathComponent(), newRoot: customFolder)
-                    }
-                } else if let root = originalRoot {
-                    let newRoot = root.deletingLastPathComponent().appending(path: "\(root.lastPathComponent) converted", directoryHint: .isDirectory)
-                    policy = .mirroredDirectory(originalRoot: root, newRoot: newRoot)
-                } else {
-                    policy = .neverReplace(customSuffix: nil)
-                }
-                
                 let job = ConversionJob(
                     sourceBookmarkData: bookmarkData,
                     requestedOutput: chosenOutput,
-                    destinationPolicy: policy
+                    destinationPolicy: destinationPolicy(for: file.url, root: originalRoot, folderSuffix: " converted", fileSuffix: nil)
                 )
                 let engine = registry.engine(for: file.detectedType, output: chosenOutput)
                 let result = try await engine.convert(job: job) { _ in }
@@ -137,5 +121,79 @@ public struct QuickActionConversionService: Sendable {
             successes: successes,
             failures: failures
         )
+    }
+
+    // Re-encode every lossy file in its own format with the current
+    // settings, as "name compressed.ext" (or into "Folder compressed").
+    // Results that aren't smaller are deleted and the source reported as
+    // skipped, so compressing never leaves a bigger copy behind
+    public func compress(urls: [URL]) async throws -> BatchConversionResult {
+        let detected = expandURLs(urls).compactMap { item -> (file: DetectedFile, root: URL?)? in
+            guard let df = try? detector.detect(url: item.url), Compression.isCompressible(df.detectedType) else { return nil }
+            return (df, item.originalRoot)
+        }
+        guard !detected.isEmpty else { throw ConversionError.unsupportedSelection }
+
+        var successes: [ConversionResult] = []
+        var failures: [ConversionFailure] = []
+        var skipped: [URL] = []
+        var firstOutput: OutputFormat?
+
+        for (file, originalRoot) in detected {
+            do {
+                guard let output = await Compression.target(for: file.url, type: file.detectedType) else {
+                    skipped.append(file.url)
+                    continue
+                }
+                firstOutput = firstOutput ?? output
+                let bookmarkData = try SecurityScopedAccess(url: file.url).perform {
+                    try file.url.bookmarkData(options: [], includingResourceValuesForKeys: nil, relativeTo: nil)
+                }
+                let job = ConversionJob(
+                    sourceBookmarkData: bookmarkData,
+                    requestedOutput: output,
+                    destinationPolicy: destinationPolicy(for: file.url, root: originalRoot, folderSuffix: Compression.outputSuffix, fileSuffix: Compression.outputSuffix)
+                )
+                let engine = registry.engine(for: file.detectedType, output: output)
+                let result = try await engine.convert(job: job) { _ in }
+
+                if let before = Compression.fileSize(file.url), let after = Compression.fileSize(result.outputURL), after >= before {
+                    try? FileManager.default.removeItem(at: result.outputURL)
+                    skipped.append(file.url)
+                } else {
+                    successes.append(result)
+                }
+            } catch let error as ConversionError {
+                failures.append(ConversionFailure(sourceURL: file.url, error: error))
+            } catch {
+                logger.error("Unexpected compression error: \(error.localizedDescription, privacy: .public)")
+                failures.append(ConversionFailure(sourceURL: file.url, error: .filesystemError(error.localizedDescription)))
+            }
+        }
+
+        // Targets differ per file; the batch reports the first one
+        return BatchConversionResult(
+            requestedOutput: firstOutput ?? .jpeg,
+            successes: successes,
+            failures: failures,
+            skipped: skipped
+        )
+    }
+
+    // Folder contents mirror into a sibling "<folder><suffix>" (or the custom
+    // output folder); loose files land beside the source
+    private func destinationPolicy(for url: URL, root: URL?, folderSuffix: String, fileSuffix: String?) -> DestinationPolicy {
+        let prefs = PreferencesManager.shared
+        if prefs.useCustomOutputFolder, let customFolder = prefs.customOutputFolder {
+            if let root {
+                return .mirroredDirectory(originalRoot: root, newRoot: customFolder.appending(path: root.lastPathComponent, directoryHint: .isDirectory))
+            }
+            return .mirroredDirectory(originalRoot: url.deletingLastPathComponent(), newRoot: customFolder)
+        }
+        if let root {
+            let newRoot = root.deletingLastPathComponent().appending(path: "\(root.lastPathComponent)\(folderSuffix)", directoryHint: .isDirectory)
+            return .mirroredDirectory(originalRoot: root, newRoot: newRoot)
+        }
+        return .neverReplace(customSuffix: fileSuffix)
     }
 }

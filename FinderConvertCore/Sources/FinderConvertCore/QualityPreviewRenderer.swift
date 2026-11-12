@@ -39,6 +39,9 @@ public enum QualityPreviewRenderer {
             data = try encode(original, utType: UTType("public.avif") ?? .image, quality: quality)
         case .webp:
             data = try NativeImageConversionEngine.encodeWebP(original, quality: Float(quality * 100))
+        case .png:
+            data = try PngQuantizer.colorCount(forQuality: quality).map { try PngQuantizer.encode(original, colors: $0, dpi: nil) }
+                ?? encode(original, utType: .png, quality: 1)
         case .mp4, .mov, .hevc:
             return try await renderVideoFrame(original, format: format, preset: videoPreset)
         default:

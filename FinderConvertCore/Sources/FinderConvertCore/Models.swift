@@ -114,9 +114,10 @@ public enum OutputFormat: String, Codable, CaseIterable, Sendable {
         }
     }
 
+    // PNG below 100% reduces to a colour palette (lossy, like TinyPNG)
     public var supportsQuality: Bool {
         switch self {
-        case .jpeg, .heic, .avif, .webp: return true
+        case .jpeg, .heic, .avif, .webp, .png: return true
         default: return false
         }
     }
@@ -135,6 +136,14 @@ public enum OutputFormat: String, Codable, CaseIterable, Sendable {
     public var supportsAudioBitrate: Bool {
         switch self {
         case .mp3, .m4a: return true
+        default: return false
+        }
+    }
+
+    // Uncompressed and lossless audio shrink by channel count, not bitrate
+    public var supportsAudioChannels: Bool {
+        switch self {
+        case .wav, .aiff, .flac: return true
         default: return false
         }
     }
@@ -320,11 +329,14 @@ public struct BatchConversionResult: Sendable, Equatable {
     public let requestedOutput: OutputFormat
     public let successes: [ConversionResult]
     public let failures: [ConversionFailure]
+    // Compression only: sources whose re-encode wasn't smaller, left as is
+    public let skipped: [URL]
 
-    public init(requestedOutput: OutputFormat, successes: [ConversionResult], failures: [ConversionFailure]) {
+    public init(requestedOutput: OutputFormat, successes: [ConversionResult], failures: [ConversionFailure], skipped: [URL] = []) {
         self.requestedOutput = requestedOutput
         self.successes = successes
         self.failures = failures
+        self.skipped = skipped
     }
 }
 

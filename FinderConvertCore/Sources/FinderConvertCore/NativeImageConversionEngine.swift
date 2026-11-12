@@ -127,8 +127,14 @@ public actor NativeImageConversionEngine: ConversionEngine {
     public func cancel(jobID: UUID) async {}
 
     private func metadataProperties(from source: CGImageSource, for format: OutputFormat) -> [CFString: Any] {
-        if PreferencesManager.shared.stripMetadata(for: format) { return [:] }
-        return (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        let properties = (CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any]) ?? [:]
+        // Stripping removes camera, GPS and EXIF data but keeps what decides
+        // how the image displays: without DPI a Retina screenshot opens at
+        // double size, without orientation a phone photo turns sideways
+        if PreferencesManager.shared.stripMetadata(for: format) {
+            return properties.filter { [kCGImagePropertyDPIWidth, kCGImagePropertyDPIHeight, kCGImagePropertyOrientation].contains($0.key) }
+        }
+        return properties
     }
 
     // Encode in memory with the format's own rules (flattening, the fixed
@@ -137,6 +143,10 @@ public actor NativeImageConversionEngine: ConversionEngine {
     func encode(_ image: CGImage, format: OutputFormat, quality: Double, metadata: [CFString: Any]) throws -> Data {
         switch format {
         case .png:
+            if let colors = PngQuantizer.colorCount(forQuality: quality) {
+                let dpi = (metadata[kCGImagePropertyDPIWidth] as? Double).map { x in (x: x, y: metadata[kCGImagePropertyDPIHeight] as? Double ?? x) }
+                return try PngQuantizer.encode(image, colors: colors, dpi: dpi)
+            }
             return try encodeImageIO(image, utType: .png, format: format, properties: metadata)
         case .jpeg:
             return try encodeImageIO(try flattenIfNeeded(image), utType: .jpeg, format: format,
@@ -148,7 +158,11 @@ public actor NativeImageConversionEngine: ConversionEngine {
             return try encodeImageIO(image, utType: UTType("public.avif") ?? .image, format: format,
                                      properties: metadata.merging([kCGImageDestinationLossyCompressionQuality: quality]) { _, new in new })
         case .tiff:
-            return try encodeImageIO(image, utType: .tiff, format: format, properties: metadata)
+            // LZW: lossless and readable everywhere, often half the size
+            var tiff = metadata[kCGImagePropertyTIFFDictionary] as? [CFString: Any] ?? [:]
+            tiff[kCGImagePropertyTIFFCompression] = 5
+            return try encodeImageIO(image, utType: .tiff, format: format,
+                                     properties: metadata.merging([kCGImagePropertyTIFFDictionary: tiff]) { _, new in new })
         case .gif:
             return try encodeImageIO(image, utType: .gif, format: format, properties: metadata)
         case .bmp:

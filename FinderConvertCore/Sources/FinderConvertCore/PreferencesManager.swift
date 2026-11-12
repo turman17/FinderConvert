@@ -115,6 +115,16 @@ public struct PreferencesManager: @unchecked Sendable {
         defaults.set(value, forKey: "audioSampleRate_\(format.rawValue)")
     }
 
+    // Channel count for WAV/AIFF/FLAC: 2 (stereo) or 1 (mono)
+    public func audioChannels(for format: OutputFormat) -> Int {
+        let val = defaults.integer(forKey: "audioChannels_\(format.rawValue)")
+        return val > 0 ? val : 2
+    }
+
+    public func setAudioChannels(_ value: Int, for format: OutputFormat) {
+        defaults.set(value, forKey: "audioChannels_\(format.rawValue)")
+    }
+
     // Audio bitrate for AAC: 64000, 128000, 192000, 256000
     public func audioBitrate(for format: OutputFormat) -> Int {
         let val = defaults.integer(forKey: "audioBitrate_\(format.rawValue)")
@@ -227,6 +237,7 @@ public struct PreferencesManager: @unchecked Sendable {
         if let q = preset.heicQuality { setQuality(q, for: .heic) }
         if let q = preset.webpQuality { setQuality(q, for: .webp) }
         if let q = preset.avifQuality { setQuality(q, for: .avif) }
+        if let q = preset.pngQuality { setQuality(q, for: .png) }
         if let r = preset.resizePercent {
             for f in OutputFormat.allCases where f.supportsResize {
                 setResizePercent(r, for: f)
@@ -251,6 +262,12 @@ public struct PreferencesManager: @unchecked Sendable {
             for f in OutputFormat.allCases where f.supportsAudioBitrate {
                 setAudioBitrate(b, for: f)
             }
+        }
+        // Sample rate and channels only for WAV/AIFF/FLAC: MP3 and AAC
+        // shrink through the bitrate and keep their own sample rate
+        for f in OutputFormat.allCases where f.supportsAudioChannels {
+            if let rate = preset.audioSampleRate { setAudioSampleRate(rate, for: f) }
+            if let channels = preset.audioChannels { setAudioChannels(channels, for: f) }
         }
     }
 
@@ -318,6 +335,8 @@ public struct PreferencesManager: @unchecked Sendable {
         for (key, v) in snap.videoPreset { if let f = OutputFormat(rawValue: key) { setVideoPreset(v, for: f) } }
         for (key, v) in snap.stripMetadata { if let f = OutputFormat(rawValue: key) { setStripMetadata(v, for: f) } }
         for (key, v) in snap.audioBitrate { if let f = OutputFormat(rawValue: key) { setAudioBitrate(v, for: f) } }
+        for (key, v) in snap.audioSampleRate ?? [:] { if let f = OutputFormat(rawValue: key) { setAudioSampleRate(v, for: f) } }
+        for (key, v) in snap.audioChannels ?? [:] { if let f = OutputFormat(rawValue: key) { setAudioChannels(v, for: f) } }
     }
 
     private func captureSnapshot() -> FormatSettingsSnapshot {
@@ -331,6 +350,10 @@ public struct PreferencesManager: @unchecked Sendable {
             if f.supportsVideoQuality { snap.videoPreset[f.rawValue] = videoPreset(for: f) }
             if f.category == .image { snap.stripMetadata[f.rawValue] = stripMetadata(for: f) }
             if f.supportsAudioBitrate { snap.audioBitrate[f.rawValue] = audioBitrate(for: f) }
+            if f.supportsAudioChannels {
+                snap.audioSampleRate = (snap.audioSampleRate ?? [:]).merging([f.rawValue: audioSampleRate(for: f)]) { _, new in new }
+                snap.audioChannels = (snap.audioChannels ?? [:]).merging([f.rawValue: audioChannels(for: f)]) { _, new in new }
+            }
         }
         return snap
     }
@@ -371,6 +394,9 @@ struct FormatSettingsSnapshot: Codable {
     var videoPreset: [String: String] = [:]
     var stripMetadata: [String: Bool] = [:]
     var audioBitrate: [String: Int] = [:]
+    // Optional: baselines saved by earlier versions lack these keys
+    var audioSampleRate: [String: Int]?
+    var audioChannels: [String: Int]?
 }
 
 public struct PresetSettings: Codable, Sendable {
@@ -378,21 +404,30 @@ public struct PresetSettings: Codable, Sendable {
     public var heicQuality: Double?
     public var webpQuality: Double?
     public var avifQuality: Double?
+    // Below 1.0 reduces PNGs to a colour palette
+    public var pngQuality: Double?
     public var resizePercent: Int?
     // Longest edge cap in pixels; nil leaves the per-format setting alone
     public var maxLongestEdge: Int?
     public var videoPreset: String?
     public var stripMetadata: Bool?
     public var audioBitrate: Int?
+    // WAV/AIFF/FLAC only
+    public var audioSampleRate: Int?
+    public var audioChannels: Int?
     public var description: String?
 
     public init(jpegQuality: Double? = nil, heicQuality: Double? = nil, webpQuality: Double? = nil, avifQuality: Double? = nil,
-                resizePercent: Int? = nil, maxLongestEdge: Int? = nil, videoPreset: String? = nil, stripMetadata: Bool? = nil,
-                audioBitrate: Int? = nil, description: String? = nil) {
+                pngQuality: Double? = nil, resizePercent: Int? = nil, maxLongestEdge: Int? = nil, videoPreset: String? = nil,
+                stripMetadata: Bool? = nil, audioBitrate: Int? = nil, audioSampleRate: Int? = nil, audioChannels: Int? = nil,
+                description: String? = nil) {
         self.jpegQuality = jpegQuality
         self.heicQuality = heicQuality
         self.webpQuality = webpQuality
         self.avifQuality = avifQuality
+        self.pngQuality = pngQuality
+        self.audioSampleRate = audioSampleRate
+        self.audioChannels = audioChannels
         self.resizePercent = resizePercent
         self.maxLongestEdge = maxLongestEdge
         self.videoPreset = videoPreset
@@ -408,37 +443,37 @@ public struct PresetSettings: Codable, Sendable {
     public static let builtInGroups: [(title: String, icon: String, presets: [(name: String, icon: String, settings: PresetSettings)])] = [
         ("Image", "photo", [
         ("Web Optimized", "globe", PresetSettings(
-            jpegQuality: 0.75, heicQuality: 0.75, webpQuality: 0.75, avifQuality: 0.7,
+            jpegQuality: 0.75, heicQuality: 0.75, webpQuality: 0.75, avifQuality: 0.7, pngQuality: 0.75,
             resizePercent: 100, maxLongestEdge: 2560, stripMetadata: true,
             description: "Smaller files for websites, longest edge held to 2560 px. Strips metadata."
         )),
         ("Email Friendly", "envelope", PresetSettings(
-            jpegQuality: 0.55, heicQuality: 0.55, webpQuality: 0.55, avifQuality: 0.5,
+            jpegQuality: 0.55, heicQuality: 0.55, webpQuality: 0.55, avifQuality: 0.5, pngQuality: 0.55,
             resizePercent: 100, maxLongestEdge: 2048, stripMetadata: true,
             description: "Small files for email attachments. Longest edge held to 2048 px, strips metadata."
         )),
         ("Social Media", "person.2", PresetSettings(
-            jpegQuality: 0.8, heicQuality: 0.8, webpQuality: 0.8,
+            jpegQuality: 0.8, heicQuality: 0.8, webpQuality: 0.8, pngQuality: 0.8,
             resizePercent: 100, maxLongestEdge: 0, stripMetadata: true,
             description: "Good quality at manageable size. Strips GPS/EXIF data for privacy."
         )),
         ("Maximum Quality", "star", PresetSettings(
-            jpegQuality: 1.0, heicQuality: 1.0, webpQuality: 1.0, avifQuality: 1.0,
+            jpegQuality: 1.0, heicQuality: 1.0, webpQuality: 1.0, avifQuality: 1.0, pngQuality: 1.0,
             resizePercent: 100, maxLongestEdge: 0, stripMetadata: false,
             description: "Highest quality, original size, metadata preserved."
         )),
         ("Archive / Lossless", "archivebox", PresetSettings(
-            jpegQuality: 1.0, heicQuality: 1.0, webpQuality: 1.0, avifQuality: 1.0,
+            jpegQuality: 1.0, heicQuality: 1.0, webpQuality: 1.0, avifQuality: 1.0, pngQuality: 1.0,
             resizePercent: 100, maxLongestEdge: 0, stripMetadata: false,
             description: "Best for archival. Use with PNG or TIFF for truly lossless output."
         )),
         ("Thumbnail", "photo.on.rectangle", PresetSettings(
-            jpegQuality: 0.7, heicQuality: 0.7, webpQuality: 0.7,
+            jpegQuality: 0.7, heicQuality: 0.7, webpQuality: 0.7, pngQuality: 0.7,
             resizePercent: 25, stripMetadata: true,
             description: "Tiny previews at 25% size. Great for galleries and catalogs."
         )),
         ("Print Ready", "printer", PresetSettings(
-            jpegQuality: 0.95, heicQuality: 0.95,
+            jpegQuality: 0.95, heicQuality: 0.95, pngQuality: 1.0,
             resizePercent: 100, maxLongestEdge: 0, stripMetadata: false,
             description: "Near-lossless quality at full resolution. Keeps metadata for color profiles."
         )),
@@ -463,16 +498,16 @@ public struct PresetSettings: Codable, Sendable {
         ]),
         ("Audio", "waveform", [
         ("HQ Audio", "headphones", PresetSettings(
-            audioBitrate: 256000,
-            description: "256 kbps. Near-CD quality for music."
+            audioBitrate: 256000, audioSampleRate: 44100, audioChannels: 2,
+            description: "256 kbps. Near-CD quality for music. WAV/AIFF/FLAC: 44.1 kHz stereo."
         )),
         ("Standard Audio", "speaker.wave.2", PresetSettings(
-            audioBitrate: 128000,
-            description: "128 kbps. Good balance of quality and size."
+            audioBitrate: 128000, audioSampleRate: 32000, audioChannels: 2,
+            description: "128 kbps. Good balance of quality and size. WAV/AIFF/FLAC: 32 kHz stereo."
         )),
         ("Podcast", "mic", PresetSettings(
-            audioBitrate: 64000,
-            description: "64 kbps. Optimized for voice recordings."
+            audioBitrate: 64000, audioSampleRate: 22050, audioChannels: 1,
+            description: "64 kbps. Optimized for voice recordings. WAV/AIFF/FLAC: 22 kHz mono."
         )),
         ]),
     ]

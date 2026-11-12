@@ -21,6 +21,7 @@ public struct OutputSizeEstimator: Sendable {
         var videoPreset: String
         var audioBitrate: Int
         var sampleRate: Int
+        var channels: Int
 
         init(format: OutputFormat, preset: PresetSettings?) {
             let prefs = PreferencesManager.shared
@@ -31,6 +32,7 @@ public struct OutputSizeEstimator: Sendable {
                 case .heic: q = preset.heicQuality ?? q
                 case .webp: q = preset.webpQuality ?? q
                 case .avif: q = preset.avifQuality ?? q
+                case .png: q = preset.pngQuality ?? q
                 default: break
                 }
             }
@@ -41,6 +43,11 @@ public struct OutputSizeEstimator: Sendable {
             videoPreset = preset?.videoPreset ?? prefs.videoPreset(for: format)
             audioBitrate = preset?.audioBitrate ?? prefs.audioBitrate(for: format)
             sampleRate = prefs.audioSampleRate(for: format)
+            channels = 2
+            if format.supportsAudioChannels {
+                sampleRate = preset?.audioSampleRate ?? sampleRate
+                channels = preset?.audioChannels ?? prefs.audioChannels(for: format)
+            }
         }
     }
 
@@ -48,7 +55,8 @@ public struct OutputSizeEstimator: Sendable {
         url: URL,
         input: DetectedFileType,
         output: OutputFormat,
-        preset: PresetSettings? = nil
+        preset: PresetSettings? = nil,
+        allowProbe: Bool = true
     ) async -> Int64? {
         let settings = Settings(format: output, preset: preset)
         let estimate: Int64?
@@ -56,7 +64,7 @@ public struct OutputSizeEstimator: Sendable {
         case .image:
             estimate = estimateImage(url: url, output: output, settings: settings)
         case .video:
-            estimate = await estimateFromVideo(url: url, output: output, settings: settings)
+            estimate = await estimateFromVideo(url: url, output: output, settings: settings, allowProbe: allowProbe)
         case .audio:
             estimate = await estimateAudio(url: url, output: output, settings: settings)
         default:
@@ -97,8 +105,10 @@ public struct OutputSizeEstimator: Sendable {
         case .jpeg: bytesPerPixel = 0.8 * q * q + 0.1
         case .webp: bytesPerPixel = 0.55 * q * q + 0.06
         case .heic, .avif: bytesPerPixel = 0.45 * q * q + 0.05
-        case .png: bytesPerPixel = 1.8
-        case .tiff: bytesPerPixel = 4.0
+        case .png:
+            // Palette PNGs: one byte per pixel before deflate
+            bytesPerPixel = PngQuantizer.colorCount(forQuality: q) == nil ? 1.8 : 0.5
+        case .tiff: bytesPerPixel = 2.0 // LZW
         case .bmp: bytesPerPixel = 3.0
         case .gif: bytesPerPixel = 0.9
         case .ico: bytesPerPixel = 1.2
@@ -109,7 +119,7 @@ public struct OutputSizeEstimator: Sendable {
 
     // MARK: - Video
 
-    private func estimateFromVideo(url: URL, output: OutputFormat, settings: Settings) async -> Int64? {
+    private func estimateFromVideo(url: URL, output: OutputFormat, settings: Settings, allowProbe: Bool) async -> Int64? {
         let sourceSize = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize.map(Int64.init) ?? 0
         let asset = AVURLAsset(url: url)
         let seconds = (try? await asset.load(.duration)).map(CMTimeGetSeconds) ?? 0
@@ -119,7 +129,7 @@ public struct OutputSizeEstimator: Sendable {
             guard sourceSize > 0, seconds > 0 else { return nil }
             // Constant-quality output depends on the footage, so encode a
             // short slice from the middle and scale it up (cached per file)
-            if let probed = try? await VideoSizeProbe.projectedBytes(sourceURL: url, format: output, preset: settings.videoPreset) {
+            if allowProbe, let probed = try? await VideoSizeProbe.projectedBytes(sourceURL: url, format: output, preset: settings.videoPreset) {
                 return max(50_000, probed)
             }
             // Fallback formula: pixels per second times a measured
@@ -157,7 +167,7 @@ public struct OutputSizeEstimator: Sendable {
     }
 
     private func estimateAudioBytes(seconds: Double, output: OutputFormat, settings: Settings) -> Int64? {
-        let pcmBytesPerSecond = Double(settings.sampleRate) * 2 * 2 // stereo, 16-bit
+        let pcmBytesPerSecond = Double(settings.sampleRate) * 2 * Double(settings.channels) // 16-bit
         let bytes: Double
         switch output {
         case .mp3, .m4a: bytes = Double(settings.audioBitrate) / 8 * seconds

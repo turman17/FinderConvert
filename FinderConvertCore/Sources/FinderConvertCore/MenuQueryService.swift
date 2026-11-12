@@ -26,6 +26,30 @@ public enum MenuQuery {
               let raws = try? JSONDecoder().decode([String].self, from: data) else { return nil }
         return raws.compactMap(OutputFormat.init(rawValue:))
     }
+
+    struct EstimateRequest: Codable {
+        let paths: [String]
+        let presetNames: [String]
+    }
+
+    // Extension side: compressed-size estimates for the Compress submenu.
+    // nil when the app isn't running or couldn't answer within the timeout
+    public static func compressionEstimate(for urls: [URL], presetNames: [String], timeout: TimeInterval = 0.6) -> CompressionEstimate? {
+        guard let remote = CFMessagePortCreateRemote(nil, portName as CFString) else { return nil }
+        defer { CFMessagePortInvalidate(remote) }
+        guard let payload = try? JSONEncoder().encode(EstimateRequest(paths: urls.map(\.path), presetNames: presetNames)) else { return nil }
+
+        var reply: Unmanaged<CFData>?
+        let status = CFMessagePortSendRequest(
+            remote, estimateMessageID, payload as CFData, timeout, timeout,
+            CFRunLoopMode.defaultMode.rawValue, &reply
+        )
+        guard status == kCFMessagePortSuccess,
+              let data = reply?.takeRetainedValue() as Data? else { return nil }
+        return try? JSONDecoder().decode(CompressionEstimate.self, from: data)
+    }
+
+    static let estimateMessageID: Int32 = 1
 }
 
 // Main-app side: answers MenuQuery requests on a dedicated thread.
@@ -62,6 +86,9 @@ private func menuQueryCallback(
     _ info: UnsafeMutableRawPointer?
 ) -> Unmanaged<CFData>? {
     let empty = { Unmanaged.passRetained(Data() as CFData) }
+    if messageID == MenuQuery.estimateMessageID {
+        return estimateReply(data as Data?) ?? empty()
+    }
     guard let data = data as Data?,
           let paths = try? JSONDecoder().decode([String].self, from: data) else { return empty() }
 
@@ -69,4 +96,25 @@ private func menuQueryCallback(
     let outputs = QuickActionConversionService().sampledOutputs(for: urls)
     guard let reply = try? JSONEncoder().encode(outputs.map(\.rawValue)) else { return empty() }
     return Unmanaged.passRetained(reply as CFData)
+}
+
+// Runs the async estimate on this dedicated thread, blocking until it ends;
+// the extension stops waiting after its timeout and shows no sizes
+private func estimateReply(_ data: Data?) -> Unmanaged<CFData>? {
+    guard let data, let request = try? JSONDecoder().decode(MenuQuery.EstimateRequest.self, from: data) else { return nil }
+    let urls = request.paths.map { URL(fileURLWithPath: $0) }
+    let box = EstimateBox()
+    let done = DispatchSemaphore(value: 0)
+    Task.detached(priority: .userInitiated) {
+        box.value = await CompressionEstimate.compute(urls: urls, presetNames: request.presetNames)
+        done.signal()
+    }
+    done.wait()
+    guard let estimate = box.value, let reply = try? JSONEncoder().encode(estimate) else { return nil }
+    return Unmanaged.passRetained(reply as CFData)
+}
+
+// @unchecked Sendable: written once before the semaphore signals, read after
+private final class EstimateBox: @unchecked Sendable {
+    var value: CompressionEstimate?
 }
