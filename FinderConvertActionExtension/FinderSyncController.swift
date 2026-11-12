@@ -99,7 +99,108 @@ class FinderSyncController: FIFinderSync {
         convertItem.submenu = submenu
         menu.addItem(convertItem)
 
+        if let compressItem = compressMenuItem(for: selectedURLs, availableOutputs: availableOutputs, containsFolder: containsFolder, isFolder: isFolder) {
+            menu.addItem(compressItem)
+        }
+
         return menu
+    }
+
+    // Preset name ("" = current settings) behind each Compress item title.
+    // Finder hands actions a copy of the item, so the title is the reliable key.
+    // nonisolated(unsafe): Finder builds menus and runs actions on the main thread
+    nonisolated(unsafe) private static var compressPresetByTitle: [String: String] = [:]
+
+    private func compressMenuItem(for urls: [URL], availableOutputs: [OutputFormat], containsFolder: Bool, isFolder: Bool) -> NSMenuItem? {
+        // Folders can't be inspected here; their convertible outputs show
+        // which kinds of media they hold
+        let categories: Set<FileCategory>
+        if containsFolder {
+            let outputCategories = Set(availableOutputs.map(\.category))
+            var found = outputCategories.intersection([.image, .video])
+            if outputCategories.contains(.audio) && !outputCategories.contains(.video) { found.insert(.audio) }
+            categories = found
+        } else {
+            let detector = FileTypeDetector()
+            categories = Set(urls.compactMap { url -> FileCategory? in
+                guard let type = try? detector.detect(url: url).detectedType, Compression.isCompressible(type) else { return nil }
+                return type.category
+            })
+        }
+        guard !categories.isEmpty else { return nil }
+
+        let prefs = PreferencesManager.shared
+        let groups: [(title: String, names: [String])] = PresetSettings.builtInGroups.compactMap { group in
+            let names = group.presets
+                .filter { preset in categories.contains { Compression.preset(prefs.presetSettings(named: preset.name) ?? preset.settings, appliesTo: $0) } }
+                .map(\.name)
+            return names.isEmpty ? nil : (group.title, names)
+        } + [("Your Presets", prefs.loadAllPresets()
+                .filter { entry in categories.contains { Compression.preset(entry.value, appliesTo: $0) } }
+                .keys.sorted())].filter { !$0.names.isEmpty }
+
+        // Sizes come from the main app; folders and large selections go without
+        let estimate = containsFolder ? nil : MenuQuery.compressionEstimate(for: urls, presetNames: groups.flatMap(\.names))
+        let formatter = ByteCountFormatter()
+        formatter.countStyle = .file
+        func title(_ name: String, key: String) -> String {
+            guard let estimate, let bytes = estimate.estimates[key] else { return name }
+            // Outputs that aren't smaller are discarded, so say so up front
+            if bytes >= estimate.sourceBytes { return "\(name)  (no smaller)" }
+            return "\(name)  ~\(formatter.string(fromByteCount: bytes))"
+        }
+
+        var byTitle: [String: String] = [:]
+        let submenu = NSMenu(title: "Compress")
+        func addPreset(_ name: String, key: String) {
+            let itemTitle = title(name, key: key)
+            byTitle[itemTitle] = key
+            let item = NSMenuItem(title: itemTitle, action: #selector(compressWithPreset(_:)), keyEquivalent: "")
+            item.target = self
+            submenu.addItem(item)
+        }
+
+        addPreset("Current Settings", key: "")
+        for group in groups {
+            submenu.addItem(NSMenuItem.separator())
+            let header = NSMenuItem(title: group.title, action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            submenu.addItem(header)
+            for name in group.names { addPreset(name, key: name) }
+        }
+        submenu.addItem(NSMenuItem.separator())
+        let chooseItem = NSMenuItem(title: "Choose in FinderConvert...", action: #selector(chooseCompression(_:)), keyEquivalent: "")
+        chooseItem.target = self
+        submenu.addItem(chooseItem)
+        Self.compressPresetByTitle = byTitle
+
+        var itemTitle = isFolder ? "Compress Folder" : (urls.count > 1 ? "Compress \(urls.count) Files" : "Compress File")
+        if let estimate {
+            itemTitle += " (\(formatter.string(fromByteCount: estimate.sourceBytes)))"
+        }
+        let compressItem = NSMenuItem(title: itemTitle, action: nil, keyEquivalent: "")
+        compressItem.submenu = submenu
+        return compressItem
+    }
+
+    @objc func compressWithPreset(_ sender: NSMenuItem) {
+        guard let urls = FIFinderSyncController.default().selectedItemURLs(), !urls.isEmpty,
+              let presetName = Self.compressPresetByTitle[sender.title] else {
+            logger.error("Compress: no selection or unknown item \(sender.title, privacy: .public)")
+            return
+        }
+        var payload: [String: Any] = [
+            "action": "convert",
+            "targetFormatId": Compression.targetId,
+            "filePaths": urls.map(\.path),
+        ]
+        if !presetName.isEmpty { payload["presetName"] = presetName }
+        send(payload, activate: false)
+    }
+
+    @objc func chooseCompression(_ sender: Any?) {
+        guard let urls = FIFinderSyncController.default().selectedItemURLs(), !urls.isEmpty else { return }
+        send(["action": "compress_open", "filePaths": urls.map(\.path)], activate: true)
     }
     
     private func selector(for format: OutputFormat) -> Selector {
@@ -247,11 +348,22 @@ class FinderSyncController: FIFinderSync {
     }
 
     private func performAction(_ action: String, filePaths: [String]) {
+        send(["action": action, "filePaths": filePaths], activate: false)
+    }
+
+    // Hand an action to the main app: write it to the shared file, then wake
+    // the app (or launch it)
+    private func send(_ payload: [String: Any], activate: Bool) {
         let filePath = self.sharedFilePath
+        let data: Data
+        do {
+            data = try JSONSerialization.data(withJSONObject: payload)
+        } catch {
+            logger.error("Failed to encode action: \(error.localizedDescription, privacy: .public)")
+            return
+        }
         Task { @MainActor in
-            let payload: [String: Any] = ["action": action, "filePaths": filePaths]
             do {
-                let data = try JSONSerialization.data(withJSONObject: payload)
                 try data.write(to: filePath, options: .atomic)
                 try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: filePath.path)
             } catch {
@@ -268,7 +380,7 @@ class FinderSyncController: FIFinderSync {
                     NSNotification.Name("com.finderconvert.app.Wakeup"), object: nil, userInfo: nil, deliverImmediately: true)
             } else {
                 let config = NSWorkspace.OpenConfiguration()
-                config.activates = false
+                config.activates = activate
                 NSWorkspace.shared.openApplication(at: appURL, configuration: config) { _, error in
                     if let error { logger.error("Failed to open app: \(error.localizedDescription)") }
                 }

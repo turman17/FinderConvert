@@ -33,6 +33,7 @@ struct MenuBarDropView: View {
     @State private var availableFormats: [OutputFormat] = OutputFormat.allCases.map { $0 }
     @State private var convertingStatus: String?
     @State private var estimatedSizes: [URL: Int64] = [:]
+    @State private var compressLabel: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -154,6 +155,10 @@ struct MenuBarDropView: View {
             if !droppedFiles.isEmpty {
                 HStack(spacing: 6) {
                     Picker("", selection: $selectedFormat) {
+                        if let compressLabel {
+                            Text(compressLabel).tag(Compression.targetId)
+                            Divider()
+                        }
                         ForEach(availableFormats, id: \.rawValue) { format in
                             Text(format.displayName).tag(format.rawValue)
                         }
@@ -167,7 +172,8 @@ struct MenuBarDropView: View {
                     Button {
                         convertFiles()
                     } label: {
-                        Label("Convert", systemImage: "arrow.triangle.2.circlepath")
+                        Label(selectedFormat == Compression.targetId ? "Compress" : "Convert",
+                              systemImage: selectedFormat == Compression.targetId ? "arrow.down.right.and.arrow.up.left" : "arrow.triangle.2.circlepath")
                             .font(.caption.weight(.semibold))
                     }
                     .buttonStyle(.borderedProminent)
@@ -349,6 +355,7 @@ struct MenuBarDropView: View {
     }
 
     private func refreshFormats() {
+        compressLabel = Compression.pickerLabel(for: droppedFiles)
         if droppedFiles.isEmpty {
             availableFormats = OutputFormat.allCases.map { $0 }
             estimatedSizes = [:]
@@ -357,7 +364,8 @@ struct MenuBarDropView: View {
         let service = QuickActionConversionService()
         if let outputs = try? service.availableOutputs(for: droppedFiles), !outputs.isEmpty {
             availableFormats = outputs
-            if !outputs.contains(where: { $0.rawValue == selectedFormat }) {
+            let keepsCompress = selectedFormat == Compression.targetId && compressLabel != nil
+            if !keepsCompress && !outputs.contains(where: { $0.rawValue == selectedFormat }) {
                 selectedFormat = outputs.first?.rawValue ?? OutputFormat.jpeg.rawValue
             }
         }
@@ -366,7 +374,9 @@ struct MenuBarDropView: View {
 
     private func refreshEstimates() {
         let urls = droppedFiles
-        guard !urls.isEmpty, let format = OutputFormat(rawValue: selectedFormat) else {
+        let compressing = selectedFormat == Compression.targetId
+        let format = OutputFormat(rawValue: selectedFormat)
+        guard !urls.isEmpty, compressing || format != nil else {
             estimatedSizes = [:]
             return
         }
@@ -377,7 +387,13 @@ struct MenuBarDropView: View {
             for url in urls {
                 guard let detected = try? detector.detect(url: url),
                       detected.detectedType != .unsupported else { continue }
-                if let estimate = await estimator.estimate(url: url, input: detected.detectedType, output: format) {
+                let estimate: Int64?
+                if let format {
+                    estimate = await estimator.estimate(url: url, input: detected.detectedType, output: format)
+                } else {
+                    estimate = await Compression.estimate(url: url, type: detected.detectedType, preset: nil)
+                }
+                if let estimate {
                     result[url] = estimate
                 }
             }
@@ -493,6 +509,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
     }
     @Published var lastResults: [ConversionResult] = []
     @Published var availableUpdate: GitHubRelease?
+    // Files Finder's "Choose in FinderConvert..." sent to the Converter
+    @Published var compressRequest: [URL]?
     static weak var instance: AppDelegate?
     var updateCheckTimer: Timer?
     // Once a day; the check also runs at every launch
@@ -607,7 +625,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
             if let targetFormatId = json["targetFormatId"] as? String,
                let filePaths = json["filePaths"] as? [String] {
                 let fileURLs = filePaths.map { URL(fileURLWithPath: $0) }
-                runConversion(for: fileURLs, targetFormatId: targetFormatId)
+                runConversion(for: fileURLs, targetFormatId: targetFormatId, presetName: json["presetName"] as? String)
+                return true
+            }
+        } else if action == "compress_open" {
+            if let filePaths = json["filePaths"] as? [String] {
+                compressRequest = filePaths.map { URL(fileURLWithPath: $0) }
+                showConverter()
                 return true
             }
         } else if action == "merge_pdf" {
@@ -961,6 +985,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     PreferencesManager.shared.restoreSettingsSnapshot(settingsSnapshot)
                 }
             }
+            if targetFormatId == Compression.targetId {
+                await runCompression(for: urls, renameMap: renameMap)
+                return
+            }
             do {
                 let outputs: [OutputFormat]
                 do {
@@ -999,24 +1027,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                     throw error
                 }
 
-                // Apply renames if provided
-                var finalOutputPaths: [String] = []
-                for success in result.successes {
-                    let sourceURL = success.sourceURL
-                    if let customName = renameMap[sourceURL] {
-                        let outputURL = success.outputURL
-                        let ext = outputURL.pathExtension
-                        let renamedURL = outputURL.deletingLastPathComponent().appendingPathComponent("\(customName).\(ext)")
-                        if !FileManager.default.fileExists(atPath: renamedURL.path(percentEncoded: false)) {
-                            try? FileManager.default.moveItem(at: outputURL, to: renamedURL)
-                            finalOutputPaths.append(renamedURL.path)
-                        } else {
-                            finalOutputPaths.append(outputURL.path)
-                        }
-                    } else {
-                        finalOutputPaths.append(success.outputURL.path)
-                    }
-                }
+                let finalOutputPaths = applyRenames(renameMap, to: result)
 
                 // Record history
                 let outputSize = result.successes.reduce(into: Int64(0)) { sum, r in
@@ -1048,6 +1059,82 @@ class AppDelegate: NSObject, NSApplicationDelegate, UNUserNotificationCenterDele
                 await postFailureNotification(message: error.localizedDescription)
             }
         }
+    }
+
+    // Output paths after applying the Converter's custom names
+    private func applyRenames(_ renameMap: [URL: String], to result: BatchConversionResult) -> [String] {
+        var finalOutputPaths: [String] = []
+        for success in result.successes {
+            let sourceURL = success.sourceURL
+            if let customName = renameMap[sourceURL] {
+                let outputURL = success.outputURL
+                let ext = outputURL.pathExtension
+                let renamedURL = outputURL.deletingLastPathComponent().appendingPathComponent("\(customName).\(ext)")
+                if !FileManager.default.fileExists(atPath: renamedURL.path(percentEncoded: false)) {
+                    try? FileManager.default.moveItem(at: outputURL, to: renamedURL)
+                    finalOutputPaths.append(renamedURL.path)
+                } else {
+                    finalOutputPaths.append(outputURL.path)
+                }
+            } else {
+                finalOutputPaths.append(success.outputURL.path)
+            }
+        }
+        return finalOutputPaths
+    }
+
+    // Same-format re-encode with the current (or temporarily applied preset)
+    // settings. Always notifies: the result is worth knowing even when quick
+    private func runCompression(for urls: [URL], renameMap: [URL: String]) async {
+        let fileDesc = urls.count == 1 ? "1 file" : "\(urls.count) files"
+        activeConversion = ActiveConversion(description: "Compressing \(fileDesc)")
+        defer { activeConversion = nil }
+
+        let result: BatchConversionResult
+        do {
+            result = try await conversionService.compress(urls: urls)
+        } catch ConversionError.unsupportedSelection {
+            await postCompletionNotification(title: "Nothing to compress", body: "Compress works on images (except SVG), MP4 and MOV videos, and audio (except OGG).")
+            return
+        } catch {
+            logger.error("Compression failed: \(error.localizedDescription, privacy: .public)")
+            await postFailureNotification(message: error.localizedDescription)
+            return
+        }
+
+        let finalOutputPaths = applyRenames(renameMap, to: result)
+        let size: (URL) -> Int64 = { Int64((try? FileManager.default.attributesOfItem(atPath: $0.path)[.size] as? Int) ?? 0) }
+        let inputSize = result.successes.reduce(Int64(0)) { $0 + size($1.sourceURL) }
+        let outputSize = finalOutputPaths.reduce(Int64(0)) { $0 + size(URL(fileURLWithPath: $1)) }
+        ConversionHistoryStore.shared.add(ConversionHistoryEntry(
+            action: "compress",
+            inputFiles: urls.map { $0.lastPathComponent },
+            outputFiles: finalOutputPaths,
+            outputFormat: "Compressed",
+            totalInputSize: inputSize,
+            totalOutputSize: outputSize,
+            success: result.failures.isEmpty,
+            errorMessage: result.failures.first?.error.localizedDescription
+        ))
+        historyRefreshTrigger.toggle()
+        lastResults = result.successes
+
+        guard PreferencesManager.shared.showNotifications else { return }
+        var lines: [String] = []
+        if !result.successes.isEmpty, inputSize > 0 {
+            let saved = inputSize - outputSize
+            let percent = Int((Double(saved) / Double(inputSize) * 100).rounded())
+            lines.append("\(formatFileSize(inputSize)) → \(formatFileSize(outputSize)), \(percent)% smaller.")
+        }
+        if !result.skipped.isEmpty {
+            lines.append("\(result.skipped.count) already as small as these settings allow, left unchanged.")
+        }
+        if !result.failures.isEmpty {
+            lines.append("\(result.failures.count) could not be compressed.")
+        }
+        let count = result.successes.count
+        let title = count == 0 ? "No files compressed" : (count == 1 ? "Compressed 1 file" : "Compressed \(count) files")
+        await postCompletionNotification(title: title, body: lines.joined(separator: " "))
     }
 
     func runMergePDF(urls: [URL]) {
@@ -1452,12 +1539,14 @@ struct ConverterTab: View {
     @State private var estimatedSizes: [UUID: Int64] = [:]
     @State private var showFormatInfo = false
     @State private var maxOutputBytes: Int64 = PreferencesManager.shared.maxOutputBytes
+    // "JPEG (Compress)"-style picker entry; nil when nothing dropped compresses
+    @State private var compressLabel: String?
 
     // Which file categories a preset's settings are meaningful for
     private func presetCategories(_ s: PresetSettings) -> Set<FileCategory> {
         var cats = Set<FileCategory>()
-        if s.jpegQuality != nil || s.heicQuality != nil || s.webpQuality != nil
-            || s.avifQuality != nil || s.resizePercent != nil || s.stripMetadata != nil {
+        if s.jpegQuality != nil || s.heicQuality != nil || s.webpQuality != nil || s.avifQuality != nil
+            || s.pngQuality != nil || s.resizePercent != nil || s.stripMetadata != nil {
             cats.insert(.image)
         }
         if s.videoPreset != nil { cats.insert(.video) }
@@ -1770,6 +1859,11 @@ struct ConverterTab: View {
             // Format + Convert
             HStack(spacing: 12) {
                 Picker(droppedFiles.count > 1 ? "Format all" : "Format", selection: $selectedFormatId) {
+                    if let compressLabel {
+                        Section("Compress") {
+                            Text(compressLabel).tag(Compression.targetId)
+                        }
+                    }
                     let grouped: [(String, [OutputFormat])] = [
                         ("Images", availableFormats.filter { $0.category == .image }),
                         ("Video", availableFormats.filter { $0.category == .video }),
@@ -1814,7 +1908,8 @@ struct ConverterTab: View {
                 Spacer()
 
                 Button(action: convertFiles) {
-                    Label("Convert", systemImage: "arrow.triangle.2.circlepath")
+                    Label(selectedFormatId == Compression.targetId ? "Compress" : "Convert",
+                          systemImage: selectedFormatId == Compression.targetId ? "arrow.down.right.and.arrow.up.left" : "arrow.triangle.2.circlepath")
                         .labelStyle(.titleAndIcon)
                         .font(.body.weight(.semibold))
                         .padding(.horizontal, 12)
@@ -1843,6 +1938,21 @@ struct ConverterTab: View {
         .onChange(of: selectedFormatId) { _, _ in
             refreshEstimates()
         }
+        .onAppear { takeCompressRequest() }
+        .onChange(of: appDelegate.compressRequest) { _, _ in takeCompressRequest() }
+    }
+
+    // Files from Finder's "Choose in FinderConvert...": load them with
+    // Compress selected so presets and the size estimates are one click away
+    private func takeCompressRequest() {
+        guard let urls = appDelegate.compressRequest else { return }
+        appDelegate.compressRequest = nil
+        withAnimation(.easeOut(duration: 0.15)) {
+            convertedResults.removeAll()
+            droppedFiles = urls.map { DroppedFile(url: $0) }
+        }
+        selectedFormatId = Compression.targetId
+        refreshAvailableFormats()
     }
 
     private func iconForFile(_ url: URL) -> String {
@@ -1992,6 +2102,7 @@ struct ConverterTab: View {
 
     private func refreshAvailableFormats() {
         let urls = droppedFiles.map { $0.url }
+        compressLabel = Compression.pickerLabel(for: urls)
         if urls.isEmpty {
             availableFormats = OutputFormat.allCases.map { $0 }
             estimatedSizes = [:]
@@ -2000,7 +2111,8 @@ struct ConverterTab: View {
         let service = QuickActionConversionService()
         if let outputs = try? service.availableOutputs(for: urls), !outputs.isEmpty {
             availableFormats = outputs
-            if !outputs.contains(where: { $0.rawValue == selectedFormatId }) {
+            let keepsCompress = selectedFormatId == Compression.targetId && compressLabel != nil
+            if !keepsCompress && !outputs.contains(where: { $0.rawValue == selectedFormatId }) {
                 selectedFormatId = outputs.first?.rawValue ?? OutputFormat.jpeg.rawValue
             }
         }
@@ -2022,9 +2134,16 @@ struct ConverterTab: View {
             var result: [UUID: Int64] = [:]
             for file in files {
                 guard let detected = try? detector.detect(url: file.url),
-                      detected.detectedType != .unsupported,
-                      let format = OutputFormat(rawValue: file.formatOverride ?? globalFormat) else { continue }
+                      detected.detectedType != .unsupported else { continue }
+                let formatId = file.formatOverride ?? globalFormat
                 let preset = file.presetOverride.flatMap { PreferencesManager.shared.presetSettings(named: $0) }
+                if formatId == Compression.targetId {
+                    if let estimate = await Compression.estimate(url: file.url, type: detected.detectedType, preset: preset) {
+                        result[file.id] = estimate
+                    }
+                    continue
+                }
+                guard let format = OutputFormat(rawValue: formatId) else { continue }
                 if let estimate = await estimator.estimate(
                     url: file.url, input: detected.detectedType, output: format, preset: preset
                 ) {
@@ -2128,6 +2247,7 @@ struct FormatRowView: View {
     @State private var maxEdge: Int
     @State private var videoPreset: String
     @State private var audioSampleRate: Int
+    @State private var audioChannels: Int
     @State private var audioBitrate: Int
     @State private var stripMetadata: Bool
     @State private var markdownStyle: MarkdownStyle
@@ -2149,6 +2269,7 @@ struct FormatRowView: View {
         self._maxEdge = State(initialValue: PreferencesManager.shared.maxLongestEdge(for: format))
         self._videoPreset = State(initialValue: PreferencesManager.shared.videoPreset(for: format))
         self._audioSampleRate = State(initialValue: PreferencesManager.shared.audioSampleRate(for: format))
+        self._audioChannels = State(initialValue: PreferencesManager.shared.audioChannels(for: format))
         self._audioBitrate = State(initialValue: PreferencesManager.shared.audioBitrate(for: format))
         self._stripMetadata = State(initialValue: PreferencesManager.shared.stripMetadata(for: format))
         self._markdownStyle = State(initialValue: PreferencesManager.shared.markdownStyle)
@@ -2231,6 +2352,9 @@ struct FormatRowView: View {
         if format.supportsAudioSampleRate && audioSampleRate != 44100 {
             parts.append("\(audioSampleRate / 1000)kHz")
         }
+        if format.supportsAudioChannels && audioChannels == 1 {
+            parts.append("mono")
+        }
         if format.supportsAudioBitrate && audioBitrate != 128000 {
             parts.append("\(audioBitrate / 1000)k")
         }
@@ -2284,6 +2408,14 @@ struct FormatRowView: View {
                         Text("Best quality")
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
+                    }
+                    if format == .png {
+                        Text(quality < 0.99
+                             ? "Below 100%, PNGs are reduced to a colour palette: much smaller, with gradients dithered."
+                             : "100% keeps every colour (lossless).")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     if showQualityPreview {
                         QualityPreviewView(format: format, quality: quality, videoPreset: videoPreset)
@@ -2385,6 +2517,7 @@ struct FormatRowView: View {
                         .font(.subheadline)
                     Picker("", selection: $audioSampleRate) {
                         Text("22.05 kHz").tag(22050)
+                        Text("32 kHz").tag(32000)
                         Text("44.1 kHz").tag(44100)
                         Text("48 kHz").tag(48000)
                     }
@@ -2392,6 +2525,22 @@ struct FormatRowView: View {
                     .labelsHidden()
                     .onChange(of: audioSampleRate) { _, val in
                         PreferencesManager.shared.setAudioSampleRate(val, for: format)
+                    }
+                }
+            }
+
+            if format.supportsAudioChannels {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Channels")
+                        .font(.subheadline)
+                    Picker("", selection: $audioChannels) {
+                        Text("Stereo").tag(2)
+                        Text("Mono").tag(1)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .onChange(of: audioChannels) { _, val in
+                        PreferencesManager.shared.setAudioChannels(val, for: format)
                     }
                 }
             }
@@ -2456,6 +2605,7 @@ struct FormatInfoPopover: View {
             case .heic: q = preset.heicQuality ?? q
             case .webp: q = preset.webpQuality ?? q
             case .avif: q = preset.avifQuality ?? q
+            case .png: q = preset.pngQuality ?? q
             default: break
             }
         }
@@ -3997,12 +4147,12 @@ struct EditPresetSheet: View {
         self.preset = preset
         self.onDone = onDone
         let s = preset.settings
-        hasQuality = s.jpegQuality != nil || s.heicQuality != nil || s.webpQuality != nil || s.avifQuality != nil
+        hasQuality = s.jpegQuality != nil || s.heicQuality != nil || s.webpQuality != nil || s.avifQuality != nil || s.pngQuality != nil
         hasResize = s.resizePercent != nil
         hasStrip = s.stripMetadata != nil
         hasVideo = s.videoPreset != nil
         hasBitrate = s.audioBitrate != nil
-        self._quality = State(initialValue: s.jpegQuality ?? s.heicQuality ?? s.webpQuality ?? s.avifQuality ?? 0.9)
+        self._quality = State(initialValue: s.jpegQuality ?? s.heicQuality ?? s.webpQuality ?? s.avifQuality ?? s.pngQuality ?? 0.9)
         self._resize = State(initialValue: s.resizePercent ?? 100)
         self._maxEdge = State(initialValue: s.maxLongestEdge ?? 0)
         self._stripMeta = State(initialValue: s.stripMetadata ?? false)
@@ -4116,6 +4266,8 @@ struct EditPresetSheet: View {
             if s.heicQuality != nil { s.heicQuality = quality }
             if s.webpQuality != nil { s.webpQuality = quality }
             if s.avifQuality != nil { s.avifQuality = quality }
+            // Lossless PNG presets (Maximum Quality, Print Ready) stay lossless
+            if let png = s.pngQuality, png < 1 { s.pngQuality = quality }
         }
         if hasResize {
             s.resizePercent = resize
