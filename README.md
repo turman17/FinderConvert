@@ -63,6 +63,7 @@ Built entirely on native frameworks (ImageIO, AVFoundation, PDFKit, WebKit) plus
 
 - **Right-click conversion** -- select files in Finder, right-click, choose target format
 - **Folder conversion** -- right-click a folder to convert all files inside, preserving directory structure
+- **Compress** -- right-click images (JPEG, PNG, HEIC, WebP, AVIF, TIFF, BMP, still GIF), MP4/MOV videos, or audio (MP3, M4A, WAV, AIFF, FLAC) and pick a preset; each menu item shows the estimated result size. Files keep their format and are saved as "name compressed.ext" beside the original, and a result that wouldn't be smaller is discarded. PNGs below 100% quality become palette PNGs (like TinyPNG), TIFFs use lossless LZW, and WAV/AIFF/FLAC shrink through sample rate and mono. In the app, pick "PNG (Compress)" (or "Same Format") in the format menu
 - **Predicted output size** -- see the estimated result size before converting, updating live as you switch formats and presets. Video estimates come from a short test encode of the actual footage, not a formula
 - **Multi-sheet XLSX** -- splits into one CSV/TSV per sheet in a named folder
 - **Multi-page PDF** -- splits into one image per page in a named folder
